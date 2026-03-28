@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.6.8] - 2026-03-28
+
+### Added
+- Delegated prompt results are now injected back into the parent conversation as a user message, triggering an agent turn so the parent agent can process and respond to the delegation outcome. Applies to single delegated runs, delegated loops, and delegated chain steps.
+
 ## [0.6.7] - 2026-03-28
 
 ### Changed

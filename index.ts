@@ -45,6 +45,7 @@ interface ExecutionErrorState {
 
 interface PromptStepResult {
 	changed: boolean;
+	text?: string;
 }
 
 export default function promptModelExtension(pi: ExtensionAPI) {
@@ -218,7 +219,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 					notify(ctx, `Prompt \`${prompt.name}\` is not configured for delegated execution.`, "error");
 					return "aborted";
 				}
-				return { changed: delegated.changed };
+				return { changed: delegated.changed, text: delegated.text };
 			} catch (error) {
 				notify(ctx, error instanceof Error ? error.message : String(error), "error");
 				return { changed: false };
@@ -421,6 +422,8 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		let completedIterations = 0;
 		let converged = false;
 		let loopErrorState: ExecutionErrorState = { hasError: false, error: undefined };
+		let lastDelegatedText: string | undefined;
+		let loopAborted = false;
 
 		try {
 			for (let i = 0; i < effectiveMax; i++) {
@@ -431,6 +434,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				const prompt = prompts.get(name);
 				if (!prompt) {
 					notify(ctx, `Prompt "${name}" no longer exists`, "error");
+					loopAborted = true;
 					break;
 				}
 				const effectivePrompt = { ...prompt, ...(cwdOverride ? { cwd: cwdOverride } : {}), ...promptOverrides };
@@ -468,13 +472,20 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 					undefined,
 					loopContext,
 				);
-				if (stepResult === "aborted") break;
+				if (stepResult === "aborted") {
+					loopAborted = true;
+					break;
+				}
+				const delegatedStep = shouldDelegatePrompt(iterationPrompt, subagentOverride);
+				if (delegatedStep) {
+					lastDelegatedText = stepResult.text;
+				}
 
 				currentModel = getCurrentModel(ctx);
 				currentThinking = pi.getThinkingLevel();
 				completedIterations++;
 
-				const iterationChanged = shouldDelegatePrompt(iterationPrompt, subagentOverride)
+				const iterationChanged = delegatedStep
 					? stepResult.changed
 					: didIterationMakeChanges(getIterationEntries(ctx, iterationStartId));
 				if (useConverge && (isUnlimited || effectiveMax > 1) && !iterationChanged) {
@@ -487,6 +498,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 					const result = await ctx.navigateTree(anchorId, { summarize: true });
 					freshCollapse = null;
 					if (result.cancelled) {
+						loopAborted = true;
 						notify(ctx, "Loop cancelled", "warning");
 						break;
 					}
@@ -515,6 +527,15 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			if (!loopErrorState.hasError) {
 				notifyLoopCompletion(ctx, completedIterations, totalIterations, effectiveMax, converged, false);
 			}
+		}
+
+		if (lastDelegatedText && !loopErrorState.hasError && !loopAborted) {
+			const label = converged
+				? `Delegated loop converged after ${completedIterations} iteration(s): ${name}`
+				: `Delegated loop completed ${completedIterations} iteration(s): ${name}`;
+			pi.sendUserMessage(`[${label}]\n\n${lastDelegatedText}`);
+			await waitForTurnStart(ctx);
+			await ctx.waitForIdle();
 		}
 
 		if (loopErrorState.hasError) {
@@ -610,6 +631,8 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		let completedIterations = 0;
 		let converged = false;
 		let chainErrorState: ExecutionErrorState = { hasError: false, error: undefined };
+		let lastDelegatedText: string | undefined;
+		let chainAborted = false;
 		if (effectiveMax > 1) {
 			loopState = { currentIteration: 1, totalIterations };
 			accumulatedSummaries = [];
@@ -622,7 +645,10 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 					loopState!.currentIteration = iteration + 1;
 					updateLoopStatus(ctx);
 					refreshPrompts(ctx.cwd, ctx);
-					if (!validateChainSteps()) break;
+					if (!validateChainSteps()) {
+						chainAborted = true;
+						break;
+					}
 				}
 
 				const templates = steps.map((step) =>
@@ -700,6 +726,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 							aborted = true;
 							break;
 						}
+						lastDelegatedText = delegated.text;
 
 						currentModel = getCurrentModel(ctx);
 						currentThinking = pi.getThinkingLevel();
@@ -764,8 +791,12 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 								stepLoopContext,
 							);
 							if (stepResult === "aborted") {
+								chainAborted = true;
 								aborted = true;
 								break;
+							}
+							if (shouldDelegatePrompt(singleStep.prompt, subagentOverride)) {
+								lastDelegatedText = stepResult.text;
 							}
 
 							currentModel = getCurrentModel(ctx);
@@ -790,7 +821,10 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 					chainStepSummaries.push(generateChainStepSummary(stepEntries, singleStep.prompt.name, stepNumber));
 				}
 
-				if (aborted) break;
+				if (aborted) {
+					chainAborted = true;
+					break;
+				}
 				completedIterations++;
 
 				if (useConverge && (isUnlimited || effectiveMax > 1) && !iterationChanged) {
@@ -803,6 +837,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 					const result = await ctx.navigateTree(anchorId, { summarize: true });
 					freshCollapse = null;
 					if (result.cancelled) {
+						chainAborted = true;
 						notify(ctx, "Loop cancelled", "warning");
 						break;
 					}
@@ -836,6 +871,12 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			if (!chainErrorState.hasError) {
 				notifyLoopCompletion(ctx, completedIterations, totalIterations, effectiveMax, converged, true);
 			}
+		}
+
+		if (lastDelegatedText && !chainErrorState.hasError && !chainAborted) {
+			pi.sendUserMessage(`[Delegated chain complete: ${chainStepNames}]\n\n${lastDelegatedText}`);
+			await waitForTurnStart(ctx);
+			await ctx.waitForIdle();
 		}
 
 		if (chainErrorState.hasError) {
@@ -937,6 +978,11 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			subagent.override,
 		);
 		if (stepResult === "aborted") return;
+		if (shouldDelegatePrompt(effectivePrompt, subagent.override) && stepResult.text) {
+			pi.sendUserMessage(`[Delegated result: ${name}]\n\n${stepResult.text}`);
+			await waitForTurnStart(ctx);
+			await ctx.waitForIdle();
+		}
 
 		if (!shouldDelegatePrompt(effectivePrompt, subagent.override) && prompt.restore) {
 			const currentModel = getCurrentModel(ctx);

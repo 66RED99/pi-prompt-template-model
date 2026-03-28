@@ -329,7 +329,11 @@ test("parallel chain step delegates with tasks payload", async () => {
 		assert.equal(requestTasks?.[0]?.agent, "delegate");
 		assert.equal(requestTasks?.[1]?.agent, "reviewer");
 		assert.equal(pi.customMessages.length, 1);
-		assert.equal(pi.userMessages.length, 0);
+		assert.equal(pi.userMessages.length, 1);
+		assert.equal(
+			pi.userMessages[0],
+			"[Delegated chain complete: parallel(scan-fe, scan-be)]\n\n=== Task 1: delegate ===\nfe done\n\n=== Task 2: reviewer ===\nbe done",
+		);
 	});
 });
 
@@ -406,8 +410,12 @@ test("successful parallel step continues to next sequential step", async () => {
 		await pipeline.handler("", ctx);
 
 		assert.equal(pi.customMessages.length, 1);
-		assert.equal(pi.userMessages.length, 1);
+		assert.equal(pi.userMessages.length, 2);
 		assert.equal(pi.userMessages[0], "review findings");
+		assert.equal(
+			pi.userMessages[1],
+			"[Delegated chain complete: parallel(scan-fe, scan-be) -> review]\n\n=== Task 1: delegate ===\nfe done\n\n=== Task 2: delegate ===\nbe done",
+		);
 	});
 });
 

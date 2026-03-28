@@ -1727,7 +1727,10 @@ test("non-delegated steps do not receive summary preambles with chain context en
 			});
 
 			await pi.commands.get("chain-prompts")!.handler("scan -> review --chain-context", ctx);
-			assert.deepEqual(pi.userMessages, ["REVIEW"]);
+			assert.deepEqual(
+				pi.userMessages,
+				["REVIEW", "[Delegated chain complete: scan -> review]\n\nscan done"],
+			);
 		});
 	});
 });
@@ -1931,5 +1934,262 @@ test("--fork flag implies --subagent and sets inheritContext", async () => {
 		assert.equal(pi.userMessages.length, 0, "should not execute inline (delegation path taken)");
 		const notifications = getNotifications().join("\n");
 		assert.ok(notifications.length > 0, "should have attempted delegation");
+	});
+});
+
+test("delegated single run injects result as user message", async () => {
+	await withTempHome(async (root) => {
+		await withSubagentRuntime(root, async () => {
+			const cwd = join(root, "project");
+			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+			writeFileSync(join(cwd, ".pi", "prompts", "simplify.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nSINGLE`);
+
+			const pi = new FakePi();
+			promptModelExtension(pi as never);
+			const { ctx } = createBranchingContext(cwd, pi);
+			await pi.emit("session_start", {}, ctx);
+
+			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
+				const request = payload as any;
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+					...request,
+					messages: [{ role: "assistant", content: [{ type: "text", text: "single delegated result" }] }],
+					isError: false,
+				});
+			});
+
+			await pi.commands.get("simplify")!.handler("", ctx);
+
+			assert.deepEqual(pi.userMessages, ["[Delegated result: simplify]\n\nsingle delegated result"]);
+		});
+	});
+});
+
+test("delegated loop injects last iteration result as user message", async () => {
+	await withTempHome(async (root) => {
+		await withSubagentRuntime(root, async () => {
+			const cwd = join(root, "project");
+			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+			writeFileSync(join(cwd, ".pi", "prompts", "simplify.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nLOOP`);
+
+			const pi = new FakePi();
+			promptModelExtension(pi as never);
+			const { ctx } = createBranchingContext(cwd, pi);
+			await pi.emit("session_start", {}, ctx);
+
+			let delegatedCall = 0;
+			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
+				const request = payload as any;
+				delegatedCall++;
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+					...request,
+					messages: [{ role: "assistant", content: [{ type: "text", text: `delegated loop ${delegatedCall}` }] }],
+					isError: false,
+				});
+			});
+
+			await pi.commands.get("simplify")!.handler("--loop 3 --no-converge", ctx);
+
+			assert.deepEqual(
+				pi.userMessages,
+				["[Delegated loop completed 3 iteration(s): simplify]\n\ndelegated loop 3"],
+			);
+		});
+	});
+});
+
+test("delegated loop and chain abort do not inject follow-up user messages", async () => {
+	await withTempHome(async (root) => {
+		await withSubagentRuntime(root, async () => {
+			const cwd = join(root, "project");
+			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+			writeFileSync(join(cwd, ".pi", "prompts", "loop-abort.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nLOOP_ABORT`);
+			writeFileSync(
+				join(cwd, ".pi", "prompts", "chain-abort.md"),
+				'---\nchain: worker\nloop: 2\nfresh: true\nconverge: false\n---\nignored',
+			);
+			writeFileSync(join(cwd, ".pi", "prompts", "worker.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nWORKER`);
+
+			const pi = new FakePi();
+			promptModelExtension(pi as never);
+			const { ctx } = createBranchingContext(cwd, pi);
+			ctx.navigateTree = async () => ({ cancelled: true });
+			await pi.emit("session_start", {}, ctx);
+
+			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
+				const request = payload as any;
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+					...request,
+					messages: [{ role: "assistant", content: [{ type: "text", text: "delegated aborted path" }] }],
+					isError: false,
+				});
+			});
+
+			await pi.commands.get("loop-abort")!.handler("--loop 3 --fresh --no-converge", ctx);
+			await pi.commands.get("chain-abort")!.handler("", ctx);
+
+			assert.equal(pi.userMessages.length, 0);
+		});
+	});
+});
+
+test("delegated loop error after prior success does not inject stale delegated text", async () => {
+	await withTempHome(async (root) => {
+		await withSubagentRuntime(root, async () => {
+			const cwd = join(root, "project");
+			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+			writeFileSync(join(cwd, ".pi", "prompts", "loop-error.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nLOOP_ERROR`);
+
+			const pi = new FakePi();
+			promptModelExtension(pi as never);
+			const { ctx } = createBranchingContext(cwd, pi);
+			await pi.emit("session_start", {}, ctx);
+
+			let delegatedCall = 0;
+			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
+				const request = payload as any;
+				delegatedCall++;
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+				if (delegatedCall === 1) {
+					pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+						...request,
+						messages: [{ role: "assistant", content: [{ type: "text", text: "loop delegated success" }] }],
+						isError: false,
+					});
+					return;
+				}
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+					...request,
+					messages: [],
+					isError: true,
+					errorText: "delegated loop failure",
+				});
+			});
+
+			await pi.commands.get("loop-error")!.handler("--loop 2 --no-converge", ctx);
+
+			assert.equal(delegatedCall, 2);
+			assert.equal(pi.userMessages.length, 0);
+		});
+	});
+});
+
+test("delegated chain error after prior success does not inject stale delegated text", async () => {
+	await withTempHome(async (root) => {
+		await withSubagentRuntime(root, async () => {
+			const cwd = join(root, "project");
+			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+			writeFileSync(join(cwd, ".pi", "prompts", "first.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nFIRST`);
+			writeFileSync(join(cwd, ".pi", "prompts", "second.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nSECOND`);
+
+			const pi = new FakePi();
+			promptModelExtension(pi as never);
+			const { ctx } = createBranchingContext(cwd, pi);
+			await pi.emit("session_start", {}, ctx);
+
+			let delegatedCall = 0;
+			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
+				const request = payload as any;
+				delegatedCall++;
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+				if (delegatedCall === 1) {
+					pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+						...request,
+						messages: [{ role: "assistant", content: [{ type: "text", text: "chain delegated success" }] }],
+						isError: false,
+					});
+					return;
+				}
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+					...request,
+					messages: [],
+					isError: true,
+					errorText: "delegated chain failure",
+				});
+			});
+
+			await pi.commands.get("chain-prompts")!.handler("first -> second", ctx);
+
+			assert.equal(delegatedCall, 2);
+			assert.equal(pi.userMessages.length, 0);
+		});
+	});
+});
+
+test("mixed delegated/inline chain injects only the last delegated text", async () => {
+	await withTempHome(async (root) => {
+		await withSubagentRuntime(root, async () => {
+			const cwd = join(root, "project");
+			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+			writeFileSync(join(cwd, ".pi", "prompts", "scan.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nSCAN`);
+			writeFileSync(join(cwd, ".pi", "prompts", "review.md"), `---\nmodel: ${MODEL_ID}\n---\nINLINE REVIEW`);
+			writeFileSync(join(cwd, ".pi", "prompts", "finalize.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nFINALIZE`);
+
+			const pi = new FakePi();
+			promptModelExtension(pi as never);
+			const { ctx } = createBranchingContext(cwd, pi);
+			await pi.emit("session_start", {}, ctx);
+
+			let delegatedCall = 0;
+			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
+				const request = payload as any;
+				delegatedCall++;
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+					...request,
+					messages: [{
+						role: "assistant",
+						content: [{ type: "text", text: delegatedCall === 1 ? "scan delegated result" : "final delegated result" }],
+					}],
+					isError: false,
+				});
+			});
+
+			await pi.commands.get("chain-prompts")!.handler("scan -> review -> finalize", ctx);
+
+			assert.deepEqual(pi.userMessages[0], "INLINE REVIEW");
+			assert.deepEqual(
+				pi.userMessages[1],
+				"[Delegated chain complete: scan -> review -> finalize]\n\nfinal delegated result",
+			);
+		});
+	});
+});
+
+test("delegated loop convergence still triggers and injects after convergence evaluation", async () => {
+	await withTempHome(async (root) => {
+		await withSubagentRuntime(root, async () => {
+			const cwd = join(root, "project");
+			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+			writeFileSync(join(cwd, ".pi", "prompts", "simplify.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nCONVERGE`);
+
+			const pi = new FakePi();
+			promptModelExtension(pi as never);
+			const { ctx } = createBranchingContext(cwd, pi);
+			await pi.emit("session_start", {}, ctx);
+
+			let delegatedCall = 0;
+			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
+				const request = payload as any;
+				delegatedCall++;
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+					...request,
+					messages: [{ role: "assistant", content: [{ type: "text", text: "stable delegated result" }] }],
+					isError: false,
+				});
+			});
+
+			await pi.commands.get("simplify")!.handler("--loop 5", ctx);
+
+			assert.equal(delegatedCall, 1);
+			assert.deepEqual(
+				pi.userMessages,
+				["[Delegated loop converged after 1 iteration(s): simplify]\n\nstable delegated result"],
+			);
+		});
 	});
 });
