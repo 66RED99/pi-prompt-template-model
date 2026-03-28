@@ -52,6 +52,9 @@ export interface DelegatedSubagentUpdate {
 	currentTool?: string;
 	currentToolArgs?: string;
 	recentOutput?: string;
+	recentOutputLines?: string[];
+	recentTools?: Array<{ tool: string; args: string }>;
+	model?: string;
 	toolCount?: number;
 	durationMs?: number;
 	tokens?: number;
@@ -65,6 +68,9 @@ export interface DelegatedSubagentTaskProgress {
 	currentTool?: string;
 	currentToolArgs?: string;
 	recentOutput?: string;
+	recentOutputLines?: string[];
+	recentTools?: Array<{ tool: string; args: string }>;
+	model?: string;
 	toolCount?: number;
 	durationMs?: number;
 	tokens?: number;
@@ -74,9 +80,9 @@ export interface DelegatedSubagentLiveState {
 	status?: string;
 	currentTool?: string;
 	currentToolArgs?: string;
-	lastTool?: string;
-	lastToolArgs?: string;
 	recentOutput: string[];
+	recentTools: Array<{ tool: string; args: string }>;
+	model?: string;
 	toolCount: number;
 	durationMs: number;
 	tokens: number;
@@ -151,6 +157,7 @@ export function updateDelegatedLiveState(requestId: string, update: Partial<Dele
 	const now = Date.now();
 	const existing = delegatedLiveState.get(requestId) ?? {
 		recentOutput: [],
+		recentTools: [],
 		toolCount: 0,
 		durationMs: 0,
 		tokens: 0,
@@ -158,21 +165,16 @@ export function updateDelegatedLiveState(requestId: string, update: Partial<Dele
 		startedAt: now,
 		updatedAt: now,
 	};
-	// When a tool finishes (currentTool goes undefined), preserve it as lastTool
-	const toolJustCleared = update.currentTool === undefined && existing.currentTool !== undefined;
-	const lastTool = toolJustCleared ? existing.currentTool : (update.currentTool ?? existing.lastTool);
-	const lastToolArgs = toolJustCleared ? existing.currentToolArgs : (update.currentToolArgs ?? existing.lastToolArgs);
-
 	const next: DelegatedSubagentLiveState = {
 		...existing,
 		...update,
 		recentOutput: update.recentOutput ?? existing.recentOutput,
+		recentTools: update.recentTools ?? existing.recentTools,
+		model: update.model ?? existing.model,
 		toolCount: update.toolCount ?? existing.toolCount,
 		durationMs: update.durationMs ?? (now - existing.startedAt),
 		tokens: update.tokens ?? existing.tokens,
 		taskProgress: update.taskProgress ?? existing.taskProgress,
-		lastTool,
-		lastToolArgs,
 		startedAt: existing.startedAt,
 		updatedAt: now,
 	};
@@ -184,6 +186,7 @@ export function appendDelegatedLiveOutput(requestId: string, line?: string): voi
 	const fallbackNow = Date.now();
 	const existing = delegatedLiveState.get(requestId) ?? {
 		recentOutput: [],
+		recentTools: [],
 		toolCount: 0,
 		durationMs: 0,
 		tokens: 0,
@@ -191,7 +194,7 @@ export function appendDelegatedLiveOutput(requestId: string, line?: string): voi
 		startedAt: fallbackNow,
 		updatedAt: fallbackNow,
 	};
-	const recentOutput = [...existing.recentOutput, line].slice(-12);
+	const recentOutput = [...existing.recentOutput, line];
 	delegatedLiveState.set(requestId, {
 		...existing,
 		recentOutput,

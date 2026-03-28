@@ -10,6 +10,7 @@ import {
 	PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT,
 	PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT,
 	PROMPT_TEMPLATE_SUBAGENT_UPDATE_EVENT,
+	getDelegatedLiveState,
 } from "../subagent-runtime.js";
 
 function withRuntime(run: (root: string) => Promise<void>) {
@@ -441,6 +442,271 @@ test("executeSubagentPromptStep prefers aggregate parallel status over first-tas
 
 		assert.ok(statusLines.some((line) => line.includes("parallel 0/2 running")));
 		assert.equal(statusLines.some((line) => line.includes("running read")), false);
+	});
+});
+
+test("executeSubagentPromptStep keeps single-task status running between tool calls", async () => {
+	await withRuntime(async (root) => {
+		const pi = createPi();
+		const ctx = createCtx(root);
+		ctx.hasUI = true;
+		const statusLines: string[] = [];
+		ctx.ui.setStatus = (key: string, value?: string) => {
+			if (key === "prompt-subagent" && value) statusLines.push(value);
+		};
+
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
+			const request = data as any;
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_UPDATE_EVENT, {
+				requestId: request.requestId,
+				toolCount: 1,
+				taskProgress: [{ index: 0, agent: "delegate", status: "running" }],
+			});
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+				...request,
+				messages: [{ role: "assistant", content: [{ type: "text", text: "Done." }] }],
+				isError: false,
+			});
+		});
+
+		await executeSubagentPromptStep({
+			pi,
+			prompt,
+			args: [],
+			ctx,
+			currentModel: ctx.model,
+		});
+
+		assert.ok(statusLines.some((line) => line.includes("delegating to delegate · running")));
+		assert.equal(statusLines.some((line) => line.includes("completed 1 tool")), false);
+	});
+});
+
+test("executeSubagentPromptStep avoids duplicating single-task output lines from mirrored progress payloads", async () => {
+	await withRuntime(async (root) => {
+		const pi = createPi();
+		const ctx = createCtx(root);
+		let capturedOutput: string[] = [];
+
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
+			const request = data as any;
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_UPDATE_EVENT, {
+				requestId: request.requestId,
+				recentOutputLines: ["single-a", "single-b"],
+				taskProgress: [
+					{ index: 0, agent: "delegate", status: "running", recentOutputLines: ["single-a", "single-b"] },
+				],
+			});
+			capturedOutput = getDelegatedLiveState(request.requestId)?.recentOutput ?? [];
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+				...request,
+				messages: [{ role: "assistant", content: [{ type: "text", text: "Done." }] }],
+				isError: false,
+			});
+		});
+
+		await executeSubagentPromptStep({
+			pi,
+			prompt,
+			args: [],
+			ctx,
+			currentModel: ctx.model,
+		});
+
+		assert.deepEqual(capturedOutput, ["single-a", "single-b"]);
+	});
+});
+
+test("executeSubagentPromptStep keeps identical consecutive output lines from different parallel tasks", async () => {
+	await withRuntime(async (root) => {
+		const pi = createPi();
+		const ctx = createCtx(root);
+		let capturedOutput: string[] = [];
+
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
+			const request = data as any;
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_UPDATE_EVENT, {
+				requestId: request.requestId,
+				taskProgress: [
+					{ index: 0, agent: "delegate", status: "running", recentOutputLines: ["same-line"] },
+					{ index: 1, agent: "reviewer", status: "running", recentOutputLines: ["same-line"] },
+				],
+			});
+			capturedOutput = getDelegatedLiveState(request.requestId)?.recentOutput ?? [];
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+				...request,
+				messages: [],
+				parallelResults: [
+					{ agent: "delegate", messages: [{ role: "assistant", content: [{ type: "text", text: "A" }] }], isError: false },
+					{ agent: "reviewer", messages: [{ role: "assistant", content: [{ type: "text", text: "B" }] }], isError: false },
+				],
+				isError: false,
+			});
+		});
+
+		await executeSubagentPromptStep({
+			pi,
+			parallel: [
+				{ prompt, args: [] },
+				{ prompt: { ...prompt, name: "review", subagent: "reviewer" }, args: [] },
+			],
+			ctx,
+			currentModel: ctx.model,
+		});
+
+		assert.deepEqual(capturedOutput, ["same-line", "same-line"]);
+	});
+});
+
+test("executeSubagentPromptStep avoids duplicating unchanged task output lines across updates", async () => {
+	await withRuntime(async (root) => {
+		const pi = createPi();
+		const ctx = createCtx(root);
+		let capturedOutput: string[] = [];
+
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
+			const request = data as any;
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_UPDATE_EVENT, {
+				requestId: request.requestId,
+				taskProgress: [
+					{ index: 0, agent: "delegate", status: "running", recentOutputLines: ["task0-a"] },
+					{ index: 1, agent: "reviewer", status: "running", recentOutputLines: ["task1-a"] },
+				],
+			});
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_UPDATE_EVENT, {
+				requestId: request.requestId,
+				taskProgress: [
+					{ index: 0, agent: "delegate", status: "running", recentOutputLines: ["task0-a"] },
+					{ index: 1, agent: "reviewer", status: "running", recentOutputLines: ["task1-a", "task1-b"] },
+				],
+			});
+			capturedOutput = getDelegatedLiveState(request.requestId)?.recentOutput ?? [];
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+				...request,
+				messages: [],
+				parallelResults: [
+					{ agent: "delegate", messages: [{ role: "assistant", content: [{ type: "text", text: "A" }] }], isError: false },
+					{ agent: "reviewer", messages: [{ role: "assistant", content: [{ type: "text", text: "B" }] }], isError: false },
+				],
+				isError: false,
+			});
+		});
+
+		await executeSubagentPromptStep({
+			pi,
+			parallel: [
+				{ prompt, args: [] },
+				{ prompt: { ...prompt, name: "review", subagent: "reviewer" }, args: [] },
+			],
+			ctx,
+			currentModel: ctx.model,
+		});
+
+		assert.deepEqual(capturedOutput, ["task0-a", "task1-a", "task1-b"]);
+	});
+});
+
+test("executeSubagentPromptStep keeps parallel output history when top-level progress includes recentOutputLines", async () => {
+	await withRuntime(async (root) => {
+		const pi = createPi();
+		const ctx = createCtx(root);
+		let capturedOutput: string[] = [];
+
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
+			const request = data as any;
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_UPDATE_EVENT, {
+				requestId: request.requestId,
+				recentOutputLines: ["task0-a"],
+				taskProgress: [
+					{ index: 0, agent: "delegate", status: "running", recentOutputLines: ["task0-a"] },
+					{ index: 1, agent: "reviewer", status: "running", recentOutputLines: ["task1-a"] },
+				],
+			});
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_UPDATE_EVENT, {
+				requestId: request.requestId,
+				recentOutputLines: ["task0-a"],
+				taskProgress: [
+					{ index: 0, agent: "delegate", status: "running", recentOutputLines: ["task0-a"] },
+					{ index: 1, agent: "reviewer", status: "running", recentOutputLines: ["task1-a", "task1-b", "task1-c"] },
+				],
+			});
+			capturedOutput = getDelegatedLiveState(request.requestId)?.recentOutput ?? [];
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+				...request,
+				messages: [],
+				parallelResults: [
+					{ agent: "delegate", messages: [{ role: "assistant", content: [{ type: "text", text: "A" }] }], isError: false },
+					{ agent: "reviewer", messages: [{ role: "assistant", content: [{ type: "text", text: "B" }] }], isError: false },
+				],
+				isError: false,
+			});
+		});
+
+		await executeSubagentPromptStep({
+			pi,
+			parallel: [
+				{ prompt, args: [] },
+				{ prompt: { ...prompt, name: "review", subagent: "reviewer" }, args: [] },
+			],
+			ctx,
+			currentModel: ctx.model,
+		});
+
+		assert.deepEqual(capturedOutput, ["task0-a", "task1-a", "task1-b", "task1-c"]);
+	});
+});
+
+test("executeSubagentPromptStep preserves per-task model metadata when updates omit model", async () => {
+	await withRuntime(async (root) => {
+		const pi = createPi();
+		const ctx = createCtx(root);
+		let capturedModels: Array<string | undefined> = [];
+
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
+			const request = data as any;
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_UPDATE_EVENT, {
+				requestId: request.requestId,
+				taskProgress: [
+					{ index: 0, agent: "delegate", status: "running", model: "openai/gpt-5-mini" },
+					{ index: 1, agent: "reviewer", status: "running", model: "anthropic/claude-sonnet-4-20250514" },
+				],
+			});
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_UPDATE_EVENT, {
+				requestId: request.requestId,
+				taskProgress: [
+					{ index: 0, agent: "delegate", status: "running", model: undefined },
+					{ index: 1, agent: "reviewer", status: "running", model: undefined },
+				],
+			});
+			capturedModels = (getDelegatedLiveState(request.requestId)?.taskProgress ?? []).map((entry) => entry.model);
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+				...request,
+				messages: [],
+				parallelResults: [
+					{ agent: "delegate", messages: [{ role: "assistant", content: [{ type: "text", text: "A" }] }], isError: false },
+					{ agent: "reviewer", messages: [{ role: "assistant", content: [{ type: "text", text: "B" }] }], isError: false },
+				],
+				isError: false,
+			});
+		});
+
+		await executeSubagentPromptStep({
+			pi,
+			parallel: [
+				{ prompt, args: [] },
+				{ prompt: { ...prompt, name: "review", subagent: "reviewer" }, args: [] },
+			],
+			ctx,
+			currentModel: ctx.model,
+		});
+
+		assert.deepEqual(capturedModels, ["openai/gpt-5-mini", "anthropic/claude-sonnet-4-20250514"]);
 	});
 });
 

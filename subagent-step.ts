@@ -204,6 +204,9 @@ function formatProgressStatus(update: DelegatedSubagentUpdate): string | undefin
 	if (update.currentTool) {
 		return `running ${update.currentTool}${update.currentToolArgs ? ` ${update.currentToolArgs}` : ""}`;
 	}
+	if (update.taskProgress?.some((task) => task.status === "running")) {
+		return "running";
+	}
 	if (update.toolCount && update.toolCount > 0) {
 		return `completed ${update.toolCount} tool${update.toolCount === 1 ? "" : "s"}`;
 	}
@@ -214,6 +217,38 @@ function formatParallelProgressStatus(update: DelegatedSubagentUpdate): string |
 	if (!update.taskProgress || update.taskProgress.length === 0) return undefined;
 	const completed = update.taskProgress.filter((task) => task.status === "completed").length;
 	return `parallel ${completed}/${update.taskProgress.length} running`;
+}
+
+function hasOwn<T extends object>(value: T, key: PropertyKey): boolean {
+	return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function sanitizeOutputLines(lines: string[] | undefined): string[] {
+	if (!lines || lines.length === 0) return [];
+	return lines.filter((line): line is string => typeof line === "string" && line.trim() && line.trim() !== "(running...)");
+}
+
+function collectNewOutputLines(previous: string[] | undefined, next: string[] | undefined): string[] {
+	const previousLines = sanitizeOutputLines(previous);
+	const nextLines = sanitizeOutputLines(next);
+	if (nextLines.length === 0) return [];
+	if (previousLines.length === 0) return nextLines;
+
+	const overlapLimit = Math.min(previousLines.length, nextLines.length);
+	for (let overlap = overlapLimit; overlap > 0; overlap--) {
+		let matches = true;
+		for (let index = 0; index < overlap; index++) {
+			if (previousLines[previousLines.length - overlap + index] !== nextLines[index]) {
+				matches = false;
+				break;
+			}
+		}
+		if (matches) {
+			return nextLines.slice(overlap);
+		}
+	}
+
+	return nextLines;
 }
 
 function mergeTaskProgress(
@@ -235,6 +270,9 @@ function mergeTaskProgress(
 			currentTool: existing?.currentTool,
 			currentToolArgs: existing?.currentToolArgs,
 			recentOutput: existing?.recentOutput,
+			recentOutputLines: existing?.recentOutputLines,
+			recentTools: existing?.recentTools,
+			model: existing?.model ?? task.model,
 			toolCount: existing?.toolCount,
 			durationMs: existing?.durationMs,
 			tokens: existing?.tokens,
@@ -255,11 +293,20 @@ function mergeTaskProgress(
 		}
 		if (targetIndex < 0) continue;
 		consumed.add(targetIndex);
+		const current = merged[targetIndex]!;
 		merged[targetIndex] = {
-			...merged[targetIndex],
-			...entry,
 			index: targetIndex,
-			agent: merged[targetIndex]!.agent,
+			agent: current.agent,
+			status: entry.status ?? current.status,
+			currentTool: hasOwn(entry, "currentTool") ? entry.currentTool : current.currentTool,
+			currentToolArgs: hasOwn(entry, "currentToolArgs") ? entry.currentToolArgs : current.currentToolArgs,
+			recentOutput: entry.recentOutput ?? current.recentOutput,
+			recentOutputLines: entry.recentOutputLines ?? current.recentOutputLines,
+			recentTools: entry.recentTools ?? current.recentTools,
+			model: entry.model ?? current.model,
+			toolCount: entry.toolCount ?? current.toolCount,
+			durationMs: entry.durationMs ?? current.durationMs,
+			tokens: entry.tokens ?? current.tokens,
 		};
 	}
 
@@ -316,18 +363,29 @@ async function requestDelegatedRun(
 
 		let lastProgressStatus = "";
 		let widgetSet = false;
+		let refreshTimer: ReturnType<typeof setInterval> | null = null;
 
 		const showWidget = () => {
 			if (!ctx.hasUI || widgetSet) return;
 			widgetSet = true;
 			ctx.ui.setWidget(
 				DELEGATED_WIDGET_KEY,
-				(_tui, theme) => createDelegatedProgressWidget(request.requestId, request.agent, request.context, request.task, request.tasks, theme),
+				(_tui, theme) => createDelegatedProgressWidget(request.requestId, request.agent, request.context, request.task, request.tasks, theme, request.model),
 				{ placement: "aboveEditor" },
 			);
+			// Force TUI repaints every second so the elapsed timer ticks during idle periods
+			refreshTimer = setInterval(() => {
+				if (done) return;
+				const statusLine = lastProgressStatus || "running...";
+				ctx.ui.setStatus("prompt-subagent", `delegating to ${requestLabel} · ${statusLine}`);
+			}, 1000);
 		};
 
 		const clearWidget = () => {
+			if (refreshTimer) {
+				clearInterval(refreshTimer);
+				refreshTimer = null;
+			}
 			if (ctx.hasUI && widgetSet) {
 				ctx.ui.setWidget(DELEGATED_WIDGET_KEY, undefined);
 				widgetSet = false;
@@ -338,9 +396,11 @@ async function requestDelegatedRun(
 			if (done || !data || typeof data !== "object") return;
 			const update = data as DelegatedSubagentUpdate;
 			if (update.requestId !== request.requestId) return;
+
+			const previousTaskProgress = getDelegatedLiveState(request.requestId)?.taskProgress;
 			const mergedTaskProgress = mergeTaskProgress(
 				request.tasks,
-				getDelegatedLiveState(request.requestId)?.taskProgress,
+				previousTaskProgress,
 				update.taskProgress,
 			);
 			const isParallel = (request.tasks?.length ?? 0) > 0;
@@ -353,18 +413,46 @@ async function requestDelegatedRun(
 			if (progressStatus) {
 				lastProgressStatus = progressStatus;
 			}
+
 			updateDelegatedLiveState(request.requestId, {
 				status: progressStatus ?? (lastProgressStatus || "running..."),
 				currentTool: update.currentTool,
 				currentToolArgs: update.currentToolArgs,
+				recentTools: update.recentTools,
+				model: update.model,
 				toolCount: update.toolCount,
 				durationMs: update.durationMs,
 				tokens: update.tokens,
 				taskProgress: mergedTaskProgress,
 			});
-			appendDelegatedLiveOutput(request.requestId, update.recentOutput);
-			if (mergedTaskProgress) {
+
+			if (!isParallel) {
+				if (update.recentOutputLines && update.recentOutputLines.length > 0) {
+					updateDelegatedLiveState(request.requestId, {
+						recentOutput: sanitizeOutputLines(update.recentOutputLines),
+					});
+				} else {
+					appendDelegatedLiveOutput(request.requestId, update.recentOutput);
+				}
+			}
+
+			if (isParallel && mergedTaskProgress) {
 				for (const task of mergedTaskProgress) {
+					const previousTask =
+						previousTaskProgress?.find((entry) => entry.index === task.index) ??
+						previousTaskProgress?.find((entry) => entry.agent === task.agent);
+
+					const newOutputLines = collectNewOutputLines(previousTask?.recentOutputLines, task.recentOutputLines);
+					if (newOutputLines.length > 0) {
+						for (const line of newOutputLines) {
+							appendDelegatedLiveOutput(request.requestId, line);
+						}
+						continue;
+					}
+
+					if (!task.recentOutput || task.recentOutput === previousTask?.recentOutput) {
+						continue;
+					}
 					appendDelegatedLiveOutput(request.requestId, task.recentOutput);
 				}
 			}
@@ -567,11 +655,12 @@ export async function executeSubagentPromptStep(options: DelegatedPromptOptions)
 			agent: preparedTasks[0]!.agent,
 		};
 	} catch (error) {
-		const responseText = error instanceof Error ? error.message : String(error);
+		const cause = error instanceof Error ? error : new Error(String(error));
+		const responseText = cause.message;
 		if (isParallelRequest) {
-			throw new Error(`Parallel delegated prompts (${promptLabel}) failed: ${responseText}`);
+			throw new Error(`Parallel delegated prompts (${promptLabel}) failed: ${responseText}`, { cause });
 		}
-		throw new Error(`Prompt \`${preparedTasks[0]!.promptName}\` delegated subagent \`${preparedTasks[0]!.agent}\` failed: ${responseText}`);
+		throw new Error(`Prompt \`${preparedTasks[0]!.promptName}\` delegated subagent \`${preparedTasks[0]!.agent}\` failed: ${responseText}`, { cause });
 	} finally {
 		clearDelegatedLiveState(request.requestId);
 		if (ctx.hasUI) {

@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.6.7] - 2026-03-28
+
+### Changed
+- Delegation progress widget now shows a unified tool stream where completed tools scroll chronologically with the active tool highlighted at the bottom, replacing the old design where the active tool flashed at the top and disappeared on completion.
+- Delegation progress widget now renders the subagent's model name in the header (e.g., `delegate [fork] gpt-5.3-codex | 14 tools, 170k tok, 2m47s`).
+- Delegation progress widget no longer caps tool history or output lines. The box grows to show the full execution trace.
+- Delegation progress widget now refreshes every second during idle periods (model thinking) so the elapsed timer ticks smoothly instead of freezing between progress updates.
+- Enriched the delegation bridge protocol to pass through full `recentOutputLines`, `recentTools` history, and `model` from pi-subagents progress data, replacing the old single-line `recentOutput` and missing tool/model fields.
+- Removed `lastTool`/`lastToolArgs` tracking from live state (dead code after the unified tool stream redesign).
+
 ## [0.6.6] - 2026-03-28
 
 ### Added

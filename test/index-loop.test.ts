@@ -106,7 +106,7 @@ class FakePi {
 		this.userMessages.push(content);
 	}
 
-	sendMessage() {}
+	sendMessage(_message?: any) {}
 }
 
 function stripLoopPrefix(msg: string): string {
