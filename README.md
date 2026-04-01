@@ -73,7 +73,7 @@ All fields are optional. Templates that don't use any extension features (no `mo
 | `rotate` | `false` | When `true` and looping, cycle through models in the `model` list instead of using fallback semantics. Thinking levels can also be comma-separated to pair with each model. |
 | `fresh` | `false` | When looping, collapse the conversation between iterations to a brief summary instead of carrying the full context forward. Saves tokens on long loops. |
 | `converge` | `true` | When looping, stop early if an iteration makes no file changes. Set `false` to always run every iteration. |
-| `worktree` | `false` | When `true`, parallel delegated work runs in separate git worktrees. Valid on chain templates with `parallel()` steps, on delegated prompts with `parallel: N`, and on compare lineups (`workers` / `reviewers`). |
+| `worktree` | `false` | When `true`, parallel delegated work runs in separate git worktrees. Valid on chain templates with `parallel()` steps, on delegated prompts with `parallel: N`, and on compare templates via `bestOfN.worktree`. |
 
 ### Delegation
 
@@ -82,9 +82,11 @@ All fields are optional. Templates that don't use any extension features (no `mo
 | `subagent` | — | Delegate execution to a subagent instead of running in the current session. `true` uses the default `delegate` agent; a string value like `reviewer` targets that specific agent. Requires [pi-subagents](https://github.com/nicobailon/pi-subagents/). |
 | `inheritContext` | `false` | Only meaningful with `subagent`. When `true`, the subagent receives a fork of the current conversation context instead of starting fresh. |
 | `parallel` | — | Delegated prompts only. Repeats the same subagent in parallel `N` times. Each copy gets a slot header like `[Parallel subagent 2/3]` prepended to the task. Must be an integer greater than or equal to 2. |
-| `workers` | — | Compare templates only. Ordered worker lineup used for the worker phase. Each slot object supports either `subagent` (preferred) or `agent`, plus optional `model`, `task`, `taskSuffix`, `cwd`, and `count`. `subagent: true` maps to the default worker agent (`delegate`). Duplicate slots are preserved as distinct runs, and `count: N` expands one slot into N identical runs. |
-| `reviewers` | — | Compare templates only. Ordered reviewer lineup used after worker aggregation. Each slot object supports either `subagent` (preferred) or `agent`, plus optional `model`, `task`, `taskSuffix`, `cwd`, and `count`. `subagent: true` maps to the default reviewer agent (`reviewer`). |
-| `cwd` | — | Working directory for delegated subagent subprocesses. Must be an absolute path (`~/...` is expanded). Valid with `subagent`, on chain templates as the default cwd for delegated steps, and on compare lineups as the default slot cwd. |
+| `bestOfN` | — | Compare templates only. Nested compare authoring block with `workers`, `reviewers`, optional `finalApplier`, and optional `worktree`. Top-level compare fields are not supported in templates. |
+| `bestOfN.workers` | — | Ordered worker lineup used for the worker phase. Each slot object supports optional `agent`/`subagent`, optional `model`, optional `task`, optional `taskSuffix`, optional `cwd`, and optional `count`. If both `agent` and `subagent` are omitted, the default agent is `delegate`. |
+| `bestOfN.reviewers` | — | Ordered reviewer lineup used after worker aggregation. Slot shape matches workers. If both `agent` and `subagent` are omitted, the default agent is `reviewer`. |
+| `bestOfN.finalApplier` | — | Optional single-slot final apply phase that edits the real branch after reviewers. Supports optional `agent`/`subagent`, optional `model`, optional `task`, and optional `taskSuffix`. If both `agent` and `subagent` are omitted, the default agent is `delegate`. `count` and `cwd` are not supported. Requires `bestOfN.worktree: true` at runtime. |
+| `cwd` | — | Working directory for delegated subagent subprocesses. Must be an absolute path (`~/...` is expanded). Valid with `subagent`, on chain templates as the default cwd for delegated steps, and on compare prompts as the default repo cwd. Worker/reviewer slots can also set their own `cwd` inside `bestOfN.workers` / `bestOfN.reviewers`. |
 
 ## Model Format
 
@@ -274,18 +276,20 @@ Two additional runtime flags work for any prompt (not just delegated ones):
 
 Compare templates also accept runtime lineup overrides:
 
+Prompt-template frontmatter authoring uses `bestOfN:`. Runtime overrides stay on the low-level flags below.
+
 - `--workers=<json-array>` / `--reviewers=<json-array>` replace the corresponding frontmatter lineup.
 - `--workers-append=<json-array>` / `--reviewers-append=<json-array>` append to the corresponding lineup.
+- `--final-applier=<json-object-or-one-element-array>` replaces the optional final apply slot.
 
-Each JSON array entry must be an object with either `subagent` or `agent`, plus optional `model`, `task`, `taskSuffix`, `cwd`, and `count`. In worker slots, `"subagent": true` maps to `delegate`. In reviewer slots, `"subagent": true` maps to `reviewer`. `--final-reviewer=` accepts one slot object (or a one-element array) with the same shape except `count` is not supported.
+Each worker/reviewer JSON array entry must be an object with either `subagent` or `agent`, plus optional `model`, `task`, `taskSuffix`, `cwd`, and `count`. In worker slots, `"subagent": true` maps to `delegate`. In reviewer slots, `"subagent": true` maps to `reviewer`. `--final-applier=` accepts one slot object (or a one-element array) with `subagent`/`agent`, optional `model`, optional `task`, and optional `taskSuffix`; for this final slot, `"subagent": true` maps to `delegate`, and both `count` and `cwd` are not supported.
 
 ## Best-of-N Compare Prompt
 
 This repo ships one example compare prompt under `examples/`:
 
-- `examples/best-of-n.md` installs as `/best-of-n`, runs in the current repo, and shows mixed workers, mixed reviewers, and an optional final arbiter.
+- `examples/best-of-n.md` installs as `/best-of-n`, runs in the current repo, and shows mixed workers, mixed reviewers, and an optional final apply phase.
 - Smoke test: `/best-of-n smoke test`.
-best-of-n smoke test
 
 Install them manually from this repo checkout (or from the installed package directory):
 
@@ -297,61 +301,57 @@ cp "$PTM_DIR/examples/best-of-n.md" ~/.pi/agent/prompts/best-of-n.md
 
 After copying the file, restart `pi` if it is already running. The prompt then runs an explicit compare flow:
 
-1. Worker phase: run the worker lineup in parallel (`context: fork`), preserving duplicate lineup slots.
-2. Continue as long as at least one worker succeeds. Reviewers see only the successful worker variants plus a short worker-failure summary.
-3. Reviewer phase: run reviewer slots over the same aggregated worker output.
-4. Continue as long as at least one reviewer succeeds. If `finalReviewer` is configured, it receives the successful reviewer outputs plus failure summaries and produces one final synthesis.
-5. If all reviewers fail but `finalReviewer` exists, it falls back to synthesizing directly from the successful worker variants.
+Compare prompt templates are authored under `bestOfN:`. Top-level `workers`, `reviewers`, and `finalApplier` frontmatter fields are rejected with migration diagnostics.
 
-Worker/reviewer lineups are fully configurable from frontmatter or runtime overrides, so there is no fixed three-model worker assumption. If a compare prompt omits `workers`, it falls back to one `delegate` worker using the current/main model. If it omits `reviewers`, it falls back to one `reviewer` slot. `finalReviewer` is optional.
+1. Worker phase: run the worker lineup in parallel (`context: fork`) so workers generate candidate implementations in temporary worktrees.
+2. Continue as long as at least one worker succeeds. Reviewer slots receive successful worker outputs plus worker/worktree summaries and produce findings only.
+3. Optional final apply phase: if `finalApplier` is configured, run one delegated apply step on the real compare repo (`compareCwd`) to pick a winner or synthesize/cherry-pick and apply the final patch.
+4. If all reviewers fail but `finalApplier` exists, the final apply step still runs with fallback context from workers plus reviewer failure summaries.
+
+Worker/reviewer lineups are fully configurable from `bestOfN` frontmatter or runtime overrides, so there is no fixed three-model worker assumption. If a compare prompt omits `bestOfN.workers`, it falls back to one `delegate` worker using the current/main model. If it omits `bestOfN.reviewers`, it falls back to one `reviewer` slot. `bestOfN.finalApplier` is optional, and compare runs reject an effective final applier unless `bestOfN.worktree: true` is set.
 
 For same-model best-of-N, use `count: N` on one worker slot:
 
 ```yaml
-workers:
-  - subagent: true
-    model: openai-codex/gpt-5.4:low
-    count: 4
+bestOfN:
+  workers:
+    - model: openai-codex/gpt-5.4:low
+      count: 4
 ```
 
 You can also mix models and give each slot its own count:
 
 ```yaml
-workers:
-  - subagent: true
-    model: openai-codex/gpt-5.4:low
-    count: 3
-  - subagent: true
-    model: google/gemini-2.5-pro:medium
-    count: 2
-  - subagent: true
-    model: openrouter/deepseek/deepseek-r1:low
+bestOfN:
+  workers:
+    - model: openai-codex/gpt-5.4:low
+      count: 3
+    - model: google/gemini-2.5-pro:medium
+      count: 2
+    - model: anthropic/claude-sonnet-4-20250514:high
 ```
 
-Reviewer slots support the same lineup shape, and `finalReviewer` is one optional single-slot arbiter:
+Reviewer slots support the same lineup shape, and `bestOfN.finalApplier` is one optional single-slot final apply step:
 
 ```yaml
-reviewers:
-  - subagent: true
-    model: openai-codex/gpt-5.4:low
-    count: 2
-  - subagent: true
-    model: google/gemini-2.5-pro:medium
-    taskSuffix: Focus on regression risk.
-
-finalReviewer:
-  subagent: true
-  model: anthropic/claude-sonnet-4-20250514:high
-  taskSuffix: Produce one seamless final recommendation.
+bestOfN:
+  reviewers:
+    - model: openai-codex/gpt-5.4:low
+      count: 2
+    - model: google/gemini-2.5-pro:medium
+      taskSuffix: Focus on regression risk.
+  finalApplier:
+    model: anthropic/claude-sonnet-4-20250514:high
+    taskSuffix: Apply the final patch on the current branch and report verification.
 ```
 
-Within a compare lineup, use `subagent` in docs/examples unless you specifically want the low-level normalized `agent` form. `subagent: true` means “use the default slot agent”: `delegate` in `workers`, `reviewer` in `reviewers`. You can still spell the agent name explicitly, for example `subagent: reviewer`.
+Within compare lineups, omitting both `agent` and `subagent` uses phase defaults: `delegate` in workers, `reviewer` in reviewers, and `delegate` in finalApplier. You can still set explicit `agent` or `subagent` when needed.
 
 Explicitly repeating the same slot still works, but `count: N` is the cleaner shorthand when the slot is identical.
 
 Within a compare lineup, use `task` for a full per-slot override and `taskSuffix` for a small per-slot append. `taskSuffix` is added after the shared worker task (or after the slot's `task` if you set one), which makes it the better fit for things like per-model output file names.
 
-When a compare prompt uses `worktree: true`, all worker slots must resolve to the same `cwd`. Mixed worker `cwd` values are only allowed when worktree isolation is off.
+When a compare prompt uses `bestOfN.worktree: true`, all worker slots must resolve to the same `cwd`. Mixed worker `cwd` values are only allowed when worktree isolation is off. Worktree isolation is for the worker phase only; `bestOfN.finalApplier` always applies on the real branch (`compareCwd`).
 
 ## Loop Execution
 
@@ -487,7 +487,7 @@ chain: parallel(scan-frontend, scan-backend) -> consolidate
 ---
 ```
 
-Each entry inside `parallel(...)` runs as a delegated subagent task concurrently. Parallel entries can include per-step args (for example `parallel(scan-frontend, scan-backend "auth")`), but per-step `--loop` is not supported inside parallel groups. Nested `parallel(...)` is rejected. Parallel entries must be delegated templates (`subagent: ...` or runtime `--subagent` override), and all entries in the same parallel group must resolve to the same `inheritContext` mode and `cwd`.
+Each entry inside `parallel(...)` runs as a delegated subagent task concurrently. Parallel entries can include per-step args (for example `parallel(scan-frontend, scan-backend "auth")`), but per-step `--loop` is not supported inside parallel groups. Nested `parallel(...)` is rejected. Parallel entries must be delegated templates (`subagent: ...` or runtime `--subagent` override). All entries in the same parallel group must resolve to the same `inheritContext` mode. Mixed `cwd` values are allowed normally, but when `worktree: true` is enabled they must all resolve to the same `cwd`.
 
 Add `worktree: true` (or `--worktree` at runtime) so each parallel subagent runs in its own git worktree, avoiding file conflicts when agents edit concurrently:
 

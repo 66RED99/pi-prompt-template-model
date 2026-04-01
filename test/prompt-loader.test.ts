@@ -877,7 +877,7 @@ test("loadPromptsWithModel validates parallel/worktree frontmatter combinations"
 	});
 });
 
-test("loadPromptsWithModel validates compare lineups and invalid combinations", () => {
+test("loadPromptsWithModel validates bestOfN compare lineups and cutover diagnostics", () => {
 	withTempHome((root) => {
 		const cases = [
 			{
@@ -885,22 +885,20 @@ test("loadPromptsWithModel validates compare lineups and invalid combinations", 
 				content: [
 					"---",
 					"description: Compare",
-					"workers:",
-					"  - subagent: true",
-					"    model: openai/gpt-5.4",
-					"    taskSuffix: Save findings to notes/a.md",
-					"    count: 3",
-					"  - subagent: delegate",
-					"reviewers:",
-					"  - subagent: true",
-					"    taskSuffix: Prefer findings files over prose summaries.",
-					"    cwd: /tmp/repo",
-					"    count: 2",
-					"finalReviewer:",
-					"  subagent: true",
-					"  model: openai-codex/gpt-5.4:low",
-					"  taskSuffix: Prefer merge plans over narrow wins when the diffs justify it.",
-					"worktree: true",
+					"bestOfN:",
+					"  workers:",
+					"    - model: openai/gpt-5.4",
+					"      taskSuffix: Save findings to notes/a.md",
+					"      count: 3",
+					"    - subagent: delegate",
+					"  reviewers:",
+					"    - taskSuffix: Prefer findings files over prose summaries.",
+					"      cwd: /tmp/repo",
+					"      count: 2",
+					"  finalApplier:",
+					"    model: openai-codex/gpt-5.4:low",
+					"    taskSuffix: Prefer merge plans over narrow wins when the diffs justify it.",
+					"  worktree: true",
 					"---",
 					"$@",
 				].join("\n"),
@@ -918,60 +916,154 @@ test("loadPromptsWithModel validates compare lineups and invalid combinations", 
 					assert.equal(prompt.reviewers?.[0]?.taskSuffix, "Prefer findings files over prose summaries.");
 					assert.equal(prompt.reviewers?.[0]?.cwd, "/tmp/repo");
 					assert.equal(prompt.reviewers?.[0]?.count, 2);
-					assert.equal(prompt.finalReviewer?.agent, "reviewer");
-					assert.equal(prompt.finalReviewer?.model, "openai-codex/gpt-5.4:low");
-					assert.equal(prompt.finalReviewer?.taskSuffix, "Prefer merge plans over narrow wins when the diffs justify it.");
+					assert.equal(prompt.finalApplier?.agent, "delegate");
+					assert.equal(prompt.finalApplier?.model, "openai-codex/gpt-5.4:low");
+					assert.equal(prompt.finalApplier?.taskSuffix, "Prefer merge plans over narrow wins when the diffs justify it.");
 					assert.equal(prompt.worktree, true);
 					assert.match(buildPromptCommandDescription(prompt), /workers:4/);
 					assert.match(buildPromptCommandDescription(prompt), /reviewers:2/);
-					assert.match(buildPromptCommandDescription(prompt), /final-reviewer/);
+					assert.match(buildPromptCommandDescription(prompt), /final-applier/);
 				},
 			},
 			{
-				name: "bad-compare",
+				name: "legacy-workers",
 				content: [
 					"---",
 					"model: claude-sonnet-4-20250514",
 					"workers:",
-					"  agent: delegate",
-					"reviewers:",
-					"  - agent: reviewer",
-					"    subagent: true",
+					"  - agent: delegate",
 					"---",
 					"$@",
 				].join("\n"),
 				check(result: ReturnType<typeof loadPromptsWithModel>) {
-					const prompt = result.prompts.get("bad-compare");
-					assert.ok(prompt);
-					assert.equal(prompt.workers, undefined);
-					assert.equal(prompt.reviewers, undefined);
-					assert.ok(result.diagnostics.some((d) => d.message.includes("workers")));
-					assert.ok(result.diagnostics.some((d) => d.message.includes("reviewers") && d.message.includes('cannot combine "agent" and "subagent"')));
+					assert.equal(result.prompts.has("legacy-workers"), false);
+					assert.ok(result.diagnostics.some((d) => d.message.includes("bestOfN.workers")));
+					assert.ok(result.diagnostics.some((d) => d.message.includes('compare template authoring moved under "bestOfN:"')));
 				},
 			},
 			{
-				name: "bad-count",
+				name: "legacy-reviewers",
 				content: [
 					"---",
-					"workers:",
-					"  - subagent: true",
-					"    count: 0",
+					"model: claude-sonnet-4-20250514",
 					"reviewers:",
-					"  - subagent: true",
-					"finalReviewer:",
-					"  subagent: true",
-					"  count: 2",
+					"  - agent: reviewer",
 					"---",
 					"$@",
 				].join("\n"),
 				check(result: ReturnType<typeof loadPromptsWithModel>) {
-					const prompt = result.prompts.get("bad-count");
+					assert.equal(result.prompts.has("legacy-reviewers"), false);
+					assert.ok(result.diagnostics.some((d) => d.message.includes("bestOfN.reviewers")));
+					assert.ok(result.diagnostics.some((d) => d.message.includes('compare template authoring moved under "bestOfN:"')));
+				},
+			},
+			{
+				name: "legacy-final-applier",
+				content: [
+					"---",
+					"model: claude-sonnet-4-20250514",
+					"finalApplier:",
+					"  agent: reviewer",
+					"---",
+					"$@",
+				].join("\n"),
+				check(result: ReturnType<typeof loadPromptsWithModel>) {
+					assert.equal(result.prompts.has("legacy-final-applier"), false);
+					assert.ok(result.diagnostics.some((d) => d.message.includes("bestOfN.finalApplier")));
+					assert.ok(result.diagnostics.some((d) => d.message.includes('compare template authoring moved under "bestOfN:"')));
+				},
+			},
+			{
+				name: "mixed-top-level-and-bestofn",
+				content: [
+					"---",
+					"workers:",
+					"  - agent: reviewer",
+					"bestOfN:",
+					"  workers:",
+					"    - model: openai/gpt-5.4",
+					"---",
+					"$@",
+				].join("\n"),
+				check(result: ReturnType<typeof loadPromptsWithModel>) {
+					const prompt = result.prompts.get("mixed-top-level-and-bestofn");
 					assert.ok(prompt);
-					assert.equal(prompt.workers, undefined);
-					assert.equal(prompt.reviewers?.length, 1);
-					assert.equal(prompt.finalReviewer, undefined);
-					assert.ok(result.diagnostics.some((d) => d.message.includes("count") && d.message.includes("greater than or equal to 1")));
-					assert.ok(result.diagnostics.some((d) => d.message.includes("finalReviewer") && d.message.includes("count") && d.message.includes("not supported")));
+					assert.equal(prompt.workers?.length, 1);
+					assert.equal(prompt.workers?.[0]?.agent, "delegate");
+					assert.equal(prompt.workers?.[0]?.model, "openai/gpt-5.4");
+					assert.ok(result.diagnostics.some((d) => d.message.includes("bestOfN.workers")));
+				},
+			},
+			{
+				name: "top-level-worktree-with-bestofn",
+				content: [
+					"---",
+					"worktree: false",
+					"bestOfN:",
+					"  workers:",
+					"    - model: openai/gpt-5.4",
+					"  worktree: true",
+					"---",
+					"$@",
+				].join("\n"),
+				check(result: ReturnType<typeof loadPromptsWithModel>) {
+					const prompt = result.prompts.get("top-level-worktree-with-bestofn");
+					assert.ok(prompt);
+					assert.equal(prompt.worktree, true);
+					assert.ok(result.diagnostics.some((d) => d.message.includes("bestOfN.worktree")));
+				},
+			},
+			{
+				name: "bad-final-cwd",
+				content: [
+					"---",
+					"bestOfN:",
+					"  workers:",
+					"    - model: openai/gpt-5.4",
+					"  finalApplier:",
+					"    cwd: /tmp/other-repo",
+					"---",
+					"$@",
+				].join("\n"),
+				check(result: ReturnType<typeof loadPromptsWithModel>) {
+					const prompt = result.prompts.get("bad-final-cwd");
+					assert.ok(prompt);
+					assert.equal(prompt.finalApplier, undefined);
+					assert.ok(result.diagnostics.some((d) => d.message.includes("finalApplier") && d.message.includes("cwd") && d.message.includes("not supported")));
+				},
+			},
+			{
+				name: "bad-final-count",
+				content: [
+					"---",
+					"bestOfN:",
+					"  workers:",
+					"    - model: openai/gpt-5.4",
+					"  finalApplier:",
+					"    count: 2",
+					"---",
+					"$@",
+				].join("\n"),
+				check(result: ReturnType<typeof loadPromptsWithModel>) {
+					const prompt = result.prompts.get("bad-final-count");
+					assert.ok(prompt);
+					assert.equal(prompt.finalApplier, undefined);
+					assert.ok(result.diagnostics.some((d) => d.message.includes("finalApplier") && d.message.includes("count") && d.message.includes("not supported")));
+				},
+			},
+			{
+				name: "bad-bestofn-root",
+				content: [
+					"---",
+					"model: claude-sonnet-4-20250514",
+					"bestOfN: true",
+					"---",
+					"$@",
+				].join("\n"),
+				check(result: ReturnType<typeof loadPromptsWithModel>) {
+					assert.equal(result.prompts.has("bad-bestofn-root"), false);
+					assert.ok(result.diagnostics.some((d) => d.message.includes('"bestOfN" must be an object')));
+					assert.ok(result.diagnostics.some((d) => d.message.includes('"bestOfN" did not produce a valid compare configuration')));
 				},
 			},
 			{
@@ -980,19 +1072,18 @@ test("loadPromptsWithModel validates compare lineups and invalid combinations", 
 					"---",
 					"model: claude-sonnet-4-20250514",
 					"subagent: true",
-					"workers:",
-					"  - agent: delegate",
-					"finalReviewer:",
-					"  subagent: true",
+					"bestOfN:",
+					"  workers:",
+					"    - model: openai/gpt-5.4",
+					"  finalApplier:",
+					"    model: openai/gpt-5.4:low",
 					"---",
 					"$@",
 				].join("\n"),
 				check(result: ReturnType<typeof loadPromptsWithModel>) {
-					const prompt = result.prompts.get("compare-subagent");
-					assert.ok(prompt);
-					assert.equal(prompt.workers, undefined);
-					assert.equal(prompt.finalReviewer, undefined);
-					assert.ok(result.diagnostics.some((d) => d.message.includes("finalReviewer") && d.message.includes("subagent")));
+					assert.equal(result.prompts.has("compare-subagent"), false);
+					assert.ok(result.diagnostics.some((d) => d.message.includes("finalApplier") && d.message.includes("subagent")));
+					assert.ok(result.diagnostics.some((d) => d.message.includes('"bestOfN" did not produce a valid compare configuration')));
 				},
 			},
 		] as const;

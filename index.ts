@@ -71,24 +71,23 @@ interface PromptStepResult {
 }
 
 const DEFAULT_COMPARE_REVIEWER_TASK = [
-	"Review the worker variants and select the strongest patch.",
+	"Review the worker variants and produce findings only.",
 	"Required output:",
-	"1. Rank every variant from best to worst with concise rationale.",
-	"2. Name a winner and explain why it is preferred.",
-	"3. Cite concrete patch/diff evidence, including worktree change summaries when present.",
-	"4. Call out correctness risks and regression risks.",
-	"5. Extract cherry-pick ideas from non-winning variants.",
-	"6. End with one manual next command to apply the recommended patch.",
+	"1. Summarize concrete strengths with patch/diff evidence, including worktree change summaries when present.",
+	"2. Call out concrete correctness risks and regression risks.",
+	"3. Extract cherry-pick ideas from non-winning variants.",
+	"4. Do not rank variants or select a winner.",
+	"5. Do not include manual apply commands.",
 ].join("\n");
 
-const DEFAULT_COMPARE_FINAL_REVIEWER_TASK = [
-	"Compare the reviewer outputs and produce one final recommendation.",
+const DEFAULT_COMPARE_FINAL_APPLIER_TASK = [
+	"Apply the final implementation directly in the current repo.",
 	"Required output:",
-	"1. Strip repetition and discard low-value review noise.",
-	"2. Reconcile disagreements between reviewers using the worker variants as ground truth.",
-	"3. Recommend either the best single variant or a concrete merge plan that combines the best elements.",
-	"4. Call out any unresolved risk that still needs human review.",
-	"5. End with one clear manual next command.",
+	"1. Pick the best single variant or synthesize/cherry-pick across variants.",
+	"2. Apply changes directly on the current branch.",
+	"3. Keep edits minimal and focused on the implementation task.",
+	"4. Run obvious relevant verification when practical.",
+	"5. Report changed files and verification commands run.",
 ].join("\n");
 
 export default function promptModelExtension(pi: ExtensionAPI) {
@@ -477,13 +476,13 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		return lineup;
 	}
 
-	function applyFinalReviewerAction(
+	function applyFinalApplierAction(
 		defaultSlot: DelegationLineupSlot | undefined,
 		actions: LineupOverrideAction[],
 	): DelegationLineupSlot | undefined {
 		let slot = defaultSlot ? { ...defaultSlot } : undefined;
 		for (const action of actions) {
-			if (action.target !== "finalReviewer") continue;
+			if (action.target !== "finalApplier") continue;
 			slot = action.slots[0] ? { ...action.slots[0] } : undefined;
 		}
 		return slot;
@@ -531,23 +530,6 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			});
 		}
 		return normalized;
-	}
-
-	function normalizeSingleSlotCwd(
-		slot: DelegationLineupSlot | undefined,
-		defaultCwd: string,
-		ctx: ExtensionCommandContext,
-	): DelegationLineupSlot | undefined {
-		if (!slot) return undefined;
-		const slotCwd = slot.cwd ? resolveCompareCwd(slot.cwd, ctx) : defaultCwd;
-		if (!existsSync(slotCwd)) {
-			notify(ctx, `cwd directory does not exist: ${slotCwd}`, "error");
-			return undefined;
-		}
-		return {
-			...slot,
-			cwd: slotCwd,
-		};
 	}
 
 	function formatCompareSlotLabel(slot: DelegationLineupSlot, fallbackAgent: string): string {
@@ -610,7 +592,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		].join("\n");
 	}
 
-	function buildFinalReviewerPreamble(
+	function buildFinalApplierPreamble(
 		sharedTask: string,
 		workerAggregation: string,
 		workerFailureSummary?: string,
@@ -625,9 +607,12 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			workerAggregation,
 			...(workerFailureSummary ? ["", workerFailureSummary] : []),
 			"",
-			"[Reviewer outputs]",
+			"[Reviewer findings]",
 			reviewerAggregation ?? "All reviewer runs failed. Synthesize directly from the worker variants.",
 			...(reviewerFailureSummary ? ["", reviewerFailureSummary] : []),
+			"",
+			"[Final apply instructions]",
+			"Pick one winner or synthesize/cherry-pick from multiple variants, apply the final patch directly in the current repo, keep edits minimal, run obvious relevant verification when practical, and report changed files plus verification run.",
 		].join("\n");
 	}
 
@@ -666,7 +651,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			cwd: options.cwd,
 			workers: undefined,
 			reviewers: undefined,
-			finalReviewer: undefined,
+			finalApplier: undefined,
 		};
 	}
 
@@ -729,7 +714,11 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 
 		const requestedWorkers = applyLineupActions(prompt.workers, lineupExtraction.actions, "workers") ?? [];
 		const requestedReviewers = applyLineupActions(prompt.reviewers, lineupExtraction.actions, "reviewers") ?? [];
-		const requestedFinalReviewer = applyFinalReviewerAction(prompt.finalReviewer, lineupExtraction.actions);
+		const requestedFinalApplier = applyFinalApplierAction(prompt.finalApplier, lineupExtraction.actions);
+		if (requestedFinalApplier && prompt.worktree !== true) {
+			notify(ctx, "Compare prompts with finalApplier require worktree: true.", "error");
+			return;
+		}
 
 		const workerSlots = expandLineupCounts(
 			requestedWorkers.length > 0
@@ -746,8 +735,12 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		if (!normalizedWorkers) return;
 		const normalizedReviewers = normalizeLineupCwds(reviewerSlots, compareCwd, ctx);
 		if (!normalizedReviewers) return;
-		const normalizedFinalReviewer = normalizeSingleSlotCwd(requestedFinalReviewer, compareCwd, ctx);
-		if (requestedFinalReviewer && !normalizedFinalReviewer) return;
+		const normalizedFinalApplier = requestedFinalApplier
+			? {
+				...requestedFinalApplier,
+				cwd: compareCwd,
+			}
+			: undefined;
 
 		if (prompt.worktree === true) {
 			const uniqueWorkerCwds = new Set(normalizedWorkers.map((slot) => slot.cwd));
@@ -830,7 +823,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				: undefined;
 			const reviewerFailureSummary = formatPhaseFailureSummary("Reviewer", failedReviewers);
 
-			if (!normalizedFinalReviewer) {
+			if (!normalizedFinalApplier) {
 				if (!successfulReviewerText) {
 					notify(ctx, `Compare reviewer phase failed: all reviewer slots failed.`, "error");
 					return;
@@ -849,7 +842,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				ctx,
 				currentModel: baseModel,
 				signal: ctx.signal,
-				taskPreamble: buildFinalReviewerPreamble(
+				taskPreamble: buildFinalApplierPreamble(
 					sharedTask,
 					successfulWorkerText,
 					workerFailureSummary,
@@ -857,17 +850,17 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 					reviewerFailureSummary,
 				),
 				prompt: buildComparePrompt(prompt, {
-					name: `${prompt.name}-final-reviewer`,
-					agent: normalizedFinalReviewer.agent,
-					task: buildLineupSlotTask(DEFAULT_COMPARE_FINAL_REVIEWER_TASK, normalizedFinalReviewer, taskArgs),
-					model: normalizedFinalReviewer.model,
-					cwd: normalizedFinalReviewer.cwd!,
+					name: `${prompt.name}-final-applier`,
+					agent: normalizedFinalApplier.agent,
+					task: buildLineupSlotTask(DEFAULT_COMPARE_FINAL_APPLIER_TASK, normalizedFinalApplier, taskArgs),
+					model: normalizedFinalApplier.model,
+					cwd: compareCwd,
 					inheritContext: false,
 				}),
 				args: [],
 			});
 			if (!finalResult?.text) return;
-			pi.sendUserMessage(`[Compare review complete: ${name}]\n\n${finalResult.text}`);
+			pi.sendUserMessage(`[Compare apply complete: ${name}]\n\n${finalResult.text}`);
 			await waitForTurnStart(ctx);
 			await ctx.waitForIdle();
 		} catch (error) {
@@ -1398,7 +1391,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		}
 		const argsWithoutSubagent = subagent.args;
 
-		const hasCompareLineup = prompt.workers !== undefined || prompt.reviewers !== undefined || prompt.finalReviewer !== undefined;
+		const hasCompareLineup = prompt.workers !== undefined || prompt.reviewers !== undefined || prompt.finalApplier !== undefined;
 		if (hasCompareLineup) {
 			await runComparePrompt(
 				name,

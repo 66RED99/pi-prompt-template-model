@@ -551,7 +551,7 @@ test("chain-prompts CLI command handles parallel() syntax", async () => {
 	});
 });
 
-test("compare prompt expands count, applies taskSuffix, and runs a final reviewer after partial reviewer success", async () => {
+test("compare prompt expands count, applies taskSuffix, and runs a final applier after partial reviewer success", async () => {
 	await withTempHome(async (root) => {
 		const cwd = join(root, "project");
 		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
@@ -559,20 +559,22 @@ test("compare prompt expands count, applies taskSuffix, and runs a final reviewe
 			join(cwd, ".pi", "prompts", "compare.md"),
 			[
 				"---",
-				"workers:",
-				"  - subagent: true",
+				"bestOfN:",
+				"  workers:",
+				"    - subagent: true",
+				"      model: anthropic/claude-sonnet-4-20250514",
+				"      taskSuffix: Save findings to `.compare-findings/w1.md`.",
+				"      count: 2",
+				"    - subagent: delegate",
+				"  reviewers:",
+				"    - subagent: true",
+				"      taskSuffix: Mention `.compare-findings/w1.md` in the recommendation.",
+				"      count: 2",
+				"  finalApplier:",
+				"    subagent: reviewer",
 				"    model: anthropic/claude-sonnet-4-20250514",
-				"    taskSuffix: Save findings to `.compare-findings/w1.md`.",
-				"    count: 2",
-				"  - subagent: delegate",
-				"reviewers:",
-				"  - subagent: true",
-				"    taskSuffix: Mention `.compare-findings/w1.md` in the recommendation.",
-				"    count: 2",
-				"finalReviewer:",
-				"  subagent: true",
-				"  model: anthropic/claude-sonnet-4-20250514",
-				"  taskSuffix: Produce one clean final recommendation.",
+				"    taskSuffix: Apply the best patch and report verification.",
+				"  worktree: true",
 				"---",
 				"Implement: $@",
 			].join("\n"),
@@ -654,14 +656,20 @@ test("compare prompt expands count, applies taskSuffix, and runs a final reviewe
 			assert.equal(phase, 3);
 			assert.equal(request.agent, "reviewer");
 			assert.equal(request.model, "anthropic/claude-sonnet-4-20250514");
-			assert.match(request.task ?? "", /Produce one clean final recommendation\./);
-			assert.match(request.task ?? "", /\[Reviewer outputs\]/);
+			assert.equal(request.cwd, cwd);
+			assert.equal(request.worktree, undefined);
+			assert.equal(request.tasks, undefined);
+			assert.match(request.task ?? "", /\[Worker outputs and worktree summaries\]/);
+			assert.match(request.task ?? "", /=== Worker 1 \(delegate, anthropic\/claude-sonnet-4-20250514\) ===\nw1/);
+			assert.match(request.task ?? "", /=== Worktree Changes ===/);
+			assert.match(request.task ?? "", /\[Reviewer findings\]/);
 			assert.match(request.task ?? "", /Winner: worker 2/);
 			assert.match(request.task ?? "", /\[Reviewer failures\]/);
 			assert.match(request.task ?? "", /quota/);
+			assert.match(request.task ?? "", /Apply the best patch and report verification\./);
 			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
 				...request,
-				messages: [{ role: "assistant", content: [{ type: "text", text: "Final: combine worker 2 with worker 1's tests." }] }],
+				messages: [{ role: "assistant", content: [{ type: "text", text: "Final apply: combined worker 2 with worker 1 tests." }] }],
 				isError: false,
 			});
 		});
@@ -669,12 +677,12 @@ test("compare prompt expands count, applies taskSuffix, and runs a final reviewe
 		await pi.commands.get("compare")!.handler("fix bug", ctx);
 		assert.equal(phase, 3);
 		assert.equal(pi.userMessages.length, 1);
-		assert.match(pi.userMessages[0]!, /\[Compare review complete: compare\]/);
-		assert.match(pi.userMessages[0]!, /Final: combine worker 2 with worker 1's tests\./);
+		assert.match(pi.userMessages[0]!, /\[Compare apply complete: compare\]/);
+		assert.match(pi.userMessages[0]!, /Final apply: combined worker 2 with worker 1 tests\./);
 	});
 });
 
-test("compare prompts handle partial-success policy, final-reviewer fallback, overrides, and at-path cwd", async () => {
+test("compare prompts handle partial-success policy, final-applier fallback, overrides, guardrails, and at-path cwd", async () => {
 	await withTempHome(async (root) => {
 		const cases = [
 			{
@@ -682,10 +690,11 @@ test("compare prompts handle partial-success policy, final-reviewer fallback, ov
 				command: 'compare-override --workers=[{"agent":"delegate","count":2}] --reviewers-append=[{"agent":"reviewer","count":2}] fix',
 				content: [
 					"---",
-					"workers:",
-					"  - agent: delegate",
-					"reviewers:",
-					"  - agent: reviewer",
+					"bestOfN:",
+					"  workers:",
+					"    - agent: delegate",
+					"  reviewers:",
+					"    - agent: reviewer",
 					"---",
 					"$@",
 				].join("\n"),
@@ -737,6 +746,7 @@ test("compare prompts handle partial-success policy, final-reviewer fallback, ov
 				assert(pi: FakePi, phase: number) {
 					assert.equal(phase, 2);
 					assert.equal(pi.userMessages.length, 1);
+					assert.match(pi.userMessages[0]!, /\[Compare review complete: compare-override\]/);
 					assert.match(pi.userMessages[0]!, /r1/);
 					assert.match(pi.userMessages[0]!, /r3/);
 					assert.match(pi.userMessages[0]!, /\[Reviewer failures\]/);
@@ -748,11 +758,12 @@ test("compare prompts handle partial-success policy, final-reviewer fallback, ov
 				command: "compare-all-workers-fail fix",
 				content: [
 					"---",
-					"workers:",
-					"  - agent: delegate",
-					"  - agent: delegate",
-					"reviewers:",
-					"  - agent: reviewer",
+					"bestOfN:",
+					"  workers:",
+					"    - agent: delegate",
+					"    - agent: delegate",
+					"  reviewers:",
+					"    - agent: reviewer",
 					"---",
 					"$@",
 				].join("\n"),
@@ -776,11 +787,12 @@ test("compare prompts handle partial-success policy, final-reviewer fallback, ov
 				command: "compare-no-reviewer-success fix",
 				content: [
 					"---",
-					"workers:",
-					"  - agent: delegate",
-					"reviewers:",
-					"  - agent: reviewer",
-					"  - agent: reviewer",
+					"bestOfN:",
+					"  workers:",
+					"    - agent: delegate",
+					"  reviewers:",
+					"    - agent: reviewer",
+					"    - agent: reviewer",
 					"---",
 					"$@",
 				].join("\n"),
@@ -811,13 +823,15 @@ test("compare prompts handle partial-success policy, final-reviewer fallback, ov
 				command: "compare-reviewer-fallback fix",
 				content: [
 					"---",
-					"workers:",
-					"  - agent: delegate",
-					"reviewers:",
-					"  - agent: reviewer",
-					"finalReviewer:",
-					"  agent: reviewer",
-					"  taskSuffix: Synthesize directly from workers if reviewers fail.",
+					"bestOfN:",
+					"  workers:",
+					"    - agent: delegate",
+					"  reviewers:",
+					"    - agent: reviewer",
+					"  finalApplier:",
+					"    agent: reviewer",
+					"    taskSuffix: Synthesize directly from workers if reviewers fail.",
+					"  worktree: true",
 					"---",
 					"$@",
 				].join("\n"),
@@ -836,18 +850,92 @@ test("compare prompts handle partial-success policy, final-reviewer fallback, ov
 							isError: false,
 						};
 					}
+					assert.equal(request.tasks, undefined);
+					assert.equal(request.cwd, join(root, "compare-reviewer-fallback"));
+					assert.equal(request.worktree, undefined);
 					assert.match(request.task ?? "", /All reviewer runs failed\. Synthesize directly from the worker variants\./);
 					assert.match(request.task ?? "", /\[Reviewer failures\]/);
+					assert.match(request.task ?? "", /\[Reviewer findings\]/);
 					assert.match(request.task ?? "", /Synthesize directly from workers if reviewers fail\./);
 					return {
-						messages: [{ role: "assistant", content: [{ type: "text", text: "Fallback final review" }] }],
+						messages: [{ role: "assistant", content: [{ type: "text", text: "Fallback final apply" }] }],
 						isError: false,
 					};
 				},
 				assert(pi: FakePi, phase: number) {
 					assert.equal(phase, 3);
 					assert.equal(pi.userMessages.length, 1);
-					assert.match(pi.userMessages[0]!, /Fallback final review/);
+					assert.match(pi.userMessages[0]!, /\[Compare apply complete: compare-reviewer-fallback\]/);
+					assert.match(pi.userMessages[0]!, /Fallback final apply/);
+				},
+			},
+			{
+				name: "compare-final-applier-override",
+				command: 'compare-final-applier-override --final-applier={"agent":"reviewer","model":"anthropic/claude-sonnet-4-20250514","taskSuffix":"Use runtime final apply override."} fix',
+				content: [
+					"---",
+					"bestOfN:",
+					"  workers:",
+					"    - agent: delegate",
+					"  reviewers:",
+					"    - agent: reviewer",
+					"  worktree: true",
+					"---",
+					"$@",
+				].join("\n"),
+				handle(request: any, phase: number) {
+					if (phase === 1) {
+						return {
+							messages: [],
+							parallelResults: [{ agent: "delegate", messages: [{ role: "assistant", content: [{ type: "text", text: "worker runtime" }] }], isError: false }],
+							isError: false,
+						};
+					}
+					if (phase === 2) {
+						return {
+							messages: [],
+							parallelResults: [{ agent: "reviewer", messages: [{ role: "assistant", content: [{ type: "text", text: "review runtime" }] }], isError: false }],
+							isError: false,
+						};
+					}
+					assert.equal(request.agent, "reviewer");
+					assert.equal(request.model, "anthropic/claude-sonnet-4-20250514");
+					assert.equal(request.tasks, undefined);
+					assert.equal(request.cwd, join(root, "compare-final-applier-override"));
+					assert.equal(request.worktree, undefined);
+					assert.match(request.task ?? "", /Use runtime final apply override\./);
+					return {
+						messages: [{ role: "assistant", content: [{ type: "text", text: "Runtime final apply" }] }],
+						isError: false,
+					};
+				},
+				assert(pi: FakePi, phase: number) {
+					assert.equal(phase, 3);
+					assert.equal(pi.userMessages.length, 1);
+					assert.match(pi.userMessages[0]!, /\[Compare apply complete: compare-final-applier-override\]/);
+					assert.match(pi.userMessages[0]!, /Runtime final apply/);
+				},
+			},
+			{
+				name: "compare-final-applier-guardrail",
+				command: 'compare-final-applier-guardrail --final-applier={"agent":"reviewer"} fix',
+				content: [
+					"---",
+					"bestOfN:",
+					"  workers:",
+					"    - agent: delegate",
+					"  reviewers:",
+					"    - agent: reviewer",
+					"---",
+					"$@",
+				].join("\n"),
+				handle() {
+					assert.fail("worktree guardrail should reject before delegated execution");
+					return { messages: [], isError: false };
+				},
+				assert(pi: FakePi, phase: number) {
+					assert.equal(phase, 0);
+					assert.equal(pi.userMessages.length, 0);
 				},
 			},
 			{
@@ -855,10 +943,11 @@ test("compare prompts handle partial-success policy, final-reviewer fallback, ov
 				command: `parallel-patch-compare-at-path ${join(root, "other-repo")} fix bug`,
 				content: [
 					"---",
-					"workers:",
-					"  - agent: delegate",
-					"reviewers:",
-					"  - agent: reviewer",
+					"bestOfN:",
+					"  workers:",
+					"    - agent: delegate",
+					"  reviewers:",
+					"    - agent: reviewer",
 					"---",
 					"$@",
 				].join("\n"),

@@ -34,7 +34,7 @@ export interface LineupOverrideSlot {
 }
 
 export interface LineupOverrideAction {
-	target: "workers" | "reviewers" | "finalReviewer";
+	target: "workers" | "reviewers" | "finalApplier";
 	mode: "replace" | "append";
 	slots: LineupOverrideSlot[];
 }
@@ -323,13 +323,13 @@ export function extractSubagentOverride(argsString: string): SubagentOverrideExt
 
 function parseLineupOverrideSlots(
 	raw: string,
-	target: "workers" | "reviewers" | "finalReviewer",
+	target: "workers" | "reviewers" | "finalApplier",
 	mode: "replace" | "append",
 	errors: string[],
 ): LineupOverrideAction | undefined {
-	const label = `--${target === "finalReviewer" ? "final-reviewer" : `${target}${mode === "append" ? "-append" : ""}`}`;
+	const label = `--${target === "finalApplier" ? "final-applier" : `${target}${mode === "append" ? "-append" : ""}`}`;
 	if (!raw) {
-		errors.push(`Invalid ${label}: expected ${target === "finalReviewer" ? "a slot object or a one-element JSON array" : "a JSON array of slot objects"}.`);
+		errors.push(`Invalid ${label}: expected ${target === "finalApplier" ? "a slot object or a one-element JSON array" : "a JSON array of slot objects"}.`);
 		return undefined;
 	}
 
@@ -341,7 +341,7 @@ function parseLineupOverrideSlots(
 		errors.push(`Invalid ${label}: expected valid JSON (${message}).`);
 		return undefined;
 	}
-	const entries = target === "finalReviewer"
+	const entries = target === "finalApplier"
 		? (Array.isArray(parsed)
 			? parsed.length === 1
 				? parsed
@@ -350,7 +350,7 @@ function parseLineupOverrideSlots(
 		: (Array.isArray(parsed) && parsed.length > 0 ? parsed : null);
 	if (!entries) {
 		errors.push(
-			target === "finalReviewer"
+			target === "finalApplier"
 				? `Invalid ${label}: expected a slot object or a one-element JSON array.`
 				: `Invalid ${label}: expected a non-empty JSON array.`,
 		);
@@ -380,7 +380,7 @@ function parseLineupOverrideSlots(
 
 		if (!agent && slot.subagent !== undefined) {
 			if (slot.subagent === true) {
-				agent = target === "workers" ? "delegate" : "reviewer";
+				agent = target === "reviewers" ? "reviewer" : "delegate";
 			} else if (typeof slot.subagent === "string" && slot.subagent.trim()) {
 				agent = slot.subagent.trim();
 			} else {
@@ -396,10 +396,14 @@ function parseLineupOverrideSlots(
 		const model = typeof slot.model === "string" && slot.model.trim() ? slot.model.trim() : undefined;
 		const task = typeof slot.task === "string" && slot.task.trim() ? slot.task.trim() : undefined;
 		const taskSuffix = typeof slot.taskSuffix === "string" && slot.taskSuffix.trim() ? slot.taskSuffix.trim() : undefined;
+		if (target === "finalApplier" && slot.cwd !== undefined) {
+			errors.push(`Invalid ${label}: slot ${i + 1} "cwd" is not supported.`);
+			return undefined;
+		}
 		const cwd = typeof slot.cwd === "string" && slot.cwd.trim() ? slot.cwd.trim() : undefined;
 		let count: number | undefined;
 		if (slot.count !== undefined) {
-			if (target === "finalReviewer") {
+			if (target === "finalApplier") {
 				errors.push(`Invalid ${label}: slot ${i + 1} "count" is not supported.`);
 				return undefined;
 			}
@@ -425,7 +429,7 @@ function parseLineupOverrideSlots(
 
 interface LineupOverrideFlagSpec {
 	flag: string;
-	target: "workers" | "reviewers" | "finalReviewer";
+	target: "workers" | "reviewers" | "finalApplier";
 	mode: "replace" | "append";
 }
 
@@ -434,7 +438,7 @@ const LINEUP_OVERRIDE_FLAGS: LineupOverrideFlagSpec[] = [
 	{ flag: "--reviewers-append=", target: "reviewers", mode: "append" },
 	{ flag: "--workers=", target: "workers", mode: "replace" },
 	{ flag: "--reviewers=", target: "reviewers", mode: "replace" },
-	{ flag: "--final-reviewer=", target: "finalReviewer", mode: "replace" },
+	{ flag: "--final-applier=", target: "finalApplier", mode: "replace" },
 ];
 
 function readQuotedValue(input: string, start: number): { value: string; end: number } | undefined {
@@ -527,7 +531,7 @@ function readLineupOverrideValue(input: string, start: number): { value: string;
 function parseLineupOverrideToken(
 	input: string,
 	start: number,
-): { target: "workers" | "reviewers" | "finalReviewer"; mode: "replace" | "append"; raw: string; end: number } | undefined {
+): { target: "workers" | "reviewers" | "finalApplier"; mode: "replace" | "append"; raw: string; end: number } | undefined {
 	for (const spec of LINEUP_OVERRIDE_FLAGS) {
 		if (!input.startsWith(spec.flag, start)) continue;
 		const valueStart = start + spec.flag.length;

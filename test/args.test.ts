@@ -311,7 +311,7 @@ test("extractSubagentOverride preserves quoted --fork", () => {
 	});
 });
 
-test("extractLineupOverrides parses worker/reviewer/final-reviewer slot aliases for unquoted and quoted JSON payloads", () => {
+test("extractLineupOverrides parses worker/reviewer/final-applier slot aliases for unquoted and quoted JSON payloads", () => {
 	const cases = [
 		{
 			input: 'task --workers=[{"subagent":true,"count":3},{"subagent":"delegate","model":"openai/gpt-5.4","taskSuffix":"save to notes.md"}] --reviewers-append=[{"subagent":true,"cwd":"/tmp/repo","count":2}]',
@@ -365,12 +365,12 @@ test("extractLineupOverrides parses worker/reviewer/final-reviewer slot aliases 
 			],
 		},
 		{
-			input: 'task --final-reviewer={"subagent":true,"model":"openai-codex/gpt-5.4:low","taskSuffix":"Prefer merge plans when they beat any single worker."}',
+			input: 'task --final-applier={"subagent":true,"model":"openai-codex/gpt-5.4:low","taskSuffix":"Prefer merge plans when they beat any single worker."}',
 			expected: [
 				{
-					target: "finalReviewer",
+					target: "finalApplier",
 					mode: "replace",
-					slots: [{ agent: "reviewer", model: "openai-codex/gpt-5.4:low", taskSuffix: "Prefer merge plans when they beat any single worker." }],
+					slots: [{ agent: "delegate", model: "openai-codex/gpt-5.4:low", taskSuffix: "Prefer merge plans when they beat any single worker." }],
 				},
 			],
 		},
@@ -402,14 +402,24 @@ test("extractLineupOverrides reports invalid slot payloads and strips known flag
 			patterns: [/"count" must be an integer greater than or equal to 1/, /"count" must be an integer greater than or equal to 1/],
 		},
 		{
-			input: 'task --final-reviewer=[{"subagent":true},{"subagent":true}]',
+			input: 'task --final-applier=[{"subagent":true},{"subagent":true}]',
 			errorCount: 1,
 			patterns: [/one-element JSON array/],
 		},
 		{
-			input: 'task --final-reviewer={"subagent":true,"count":2}',
+			input: 'task --final-applier={"subagent":true,"count":2}',
 			errorCount: 1,
 			patterns: [/"count" is not supported/],
+		},
+		{
+			input: 'task --final-applier={"subagent":true,"cwd":"/tmp/repo"}',
+			errorCount: 1,
+			patterns: [/"cwd" is not supported/],
+		},
+		{
+			input: 'task --final-applier={"subagent":true,"cwd":123}',
+			errorCount: 1,
+			patterns: [/"cwd" is not supported/],
 		},
 	] as const;
 

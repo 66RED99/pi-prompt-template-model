@@ -1,23 +1,47 @@
 # Changelog
 
+## [0.7.0] - 2026-04-01
+
+### Added
+- Added a first-class `bestOfN:` prompt-template authoring surface for compare workflows, with configurable `workers`, `reviewers`, optional `finalApplier`, and nested `bestOfN.worktree` support.
+- Added configurable compare runtime overrides via `--workers`, `--reviewers`, `--workers-append`, `--reviewers-append`, and `--final-applier`.
+- Added `count: N` compare-slot shorthand so one worker or reviewer slot can fan out into repeated identical runs without manual duplication.
+- Added a shipped `/best-of-n` example prompt that demonstrates mixed worker counts, mixed reviewer counts, thinking-level model suffixes, `taskSuffix`, and final real-branch application.
+
+### Changed
+- Compare prompts now run as worker fan-out, reviewer fan-in, then an optional final apply step that edits the real branch instead of stopping at recommendation prose.
+- Reviewer defaults now stay findings-only, while `finalApplier` handles winner-picking or synthesis plus best-effort verification on the current branch.
+- Legacy top-level compare frontmatter in templates (`workers`, `reviewers`, `finalApplier`, top-level compare `worktree`) is now rejected in favor of `bestOfN:`.
+- Delegated parallel live rendering now shows richer per-task output, including task index, model, recent tools, and bounded rolling output lines.
+- README and bundled examples were refreshed to match the shipped compare/runtime surface, including `bestOfN`, compare-wide vs slot-level `cwd`, and chain `parallel(...)` `cwd` rules under `worktree: true`.
+
+### Fixed
+- Compare execution now allows partial success by phase: worker and reviewer phases continue as long as at least one slot succeeds, and `finalApplier` can still fall back to worker-only evidence when every reviewer fails.
+- Preserved successful worker `=== Worktree Changes ===` summaries when building reviewer and final-apply inputs, so downstream compare stages do not lose worktree evidence.
+- Invalid `bestOfN` blocks and legacy compare templates no longer degrade into ordinary runnable prompts after diagnostics; they are skipped entirely.
+- `finalApplier` validation now correctly rejects unsupported `cwd` and `count` fields in both frontmatter and runtime overrides.
+- Corrected remaining docs/tooling drift, including the `run-prompt` unlimited-loop cap text and compare/chain `cwd` wording.
+
 ## [0.6.10] - 2026-03-30
 
 ### Added
-- Added lineup-based compare frontmatter for prompt templates: `workers` and `reviewers` slot lists (`agent` or `subagent`, optional `model`, optional `task`, optional `taskSuffix`, optional `cwd`, optional `count`), plus optional `finalReviewer` for one final synthesis step.
+- Added lineup-based compare frontmatter for prompt templates: `workers` and `reviewers` slot lists (`agent` or `subagent`, optional `model`, optional `task`, optional `taskSuffix`, optional `cwd`, optional `count`), plus optional `finalApplier` for one final apply step.
 - Added a two-phase compare execution flow for lineup templates: parallel worker phase first, then reviewer phase fed by aggregated worker output.
-- Added runtime lineup override flags for compare templates: `--workers`, `--reviewers`, `--workers-append`, `--reviewers-append`, and `--final-reviewer`.
+- Added runtime lineup override flags for compare templates: `--workers`, `--reviewers`, `--workers-append`, `--reviewers-append`, and `--final-applier`.
 - Added compare lineup `count: N` shorthand so one worker or reviewer slot can expand into repeated identical runs without manually duplicating entries.
 - Added an example compare prompt template under `examples/`: `best-of-n`, intended for manual installation into `~/.pi/agent/prompts/`.
 - Added compare-lineup `subagent` shorthand so prompt authors can use `subagent: true` for default worker/reviewer slots instead of spelling the internal `delegate` / `reviewer` agent names directly.
 
 ### Changed
+- Prompt-template compare authoring now uses nested `bestOfN:` frontmatter; the loader lowers `bestOfN.workers`, `bestOfN.reviewers`, `bestOfN.finalApplier`, and `bestOfN.worktree` into the existing runtime compare fields and rejects legacy top-level compare fields in templates.
 - Removed fixed three-worker compare assumptions from docs and prompt guidance; compare lineups are now caller-defined and duplicate slots are preserved.
-- The shipped `best-of-n` example now shows mixed workers, mixed reviewers, and an optional final arbiter, while the runtime fallback still stays at one worker when `workers` is omitted.
+- The shipped `best-of-n` example now shows mixed workers, mixed reviewers, and an optional final apply phase, while the runtime fallback still stays at one worker when `workers` is omitted.
+- Reviewers now default to findings-only output, and the optional final phase now applies the real-branch patch instead of ending at recommendation prose.
 - Parallel delegated task contract now supports per-task `cwd` passthrough end-to-end across the prompt-template bridge.
 - README now explains same-model vs multi-model best-of-N configuration explicitly.
 
 ### Fixed
-- Compare execution now uses partial-success-by-phase behavior: worker and reviewer phases continue as long as at least one slot succeeds, and `finalReviewer` can fall back to worker-only synthesis if reviewer slots all fail.
+- Compare execution now uses partial-success-by-phase behavior: worker and reviewer phases continue as long as at least one slot succeeds, and `finalApplier` can fall back to worker-only synthesis if reviewer slots all fail.
 - Compare lineup slots now support `taskSuffix` so shared worker/reviewer instructions can stay in the prompt body while slots add small per-model suffixes such as output-file paths.
 - Documented the current compare worktree constraint explicitly: when `worktree: true` is enabled, all worker slots must resolve to the same `cwd`.
 
