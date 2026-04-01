@@ -13,7 +13,9 @@ bestOfN:
     - model: openai-codex/gpt-5.4-mini:high
       count: 2
   reviewers:
-    # All reviewers see the same aggregated successful worker results.
+    # Reviewers use the base `reviewer` agent from `~/.pi/agent/extensions/subagent/agents/reviewer.md`.
+    # These slots can override its default model, and they get a generated compare task built from
+    # the original request, successful worker outputs/worktree summaries, and these slot instructions.
     # count works the same way here: it runs the same reviewer slot multiple times in parallel.
     # taskSuffix appends extra instructions to just that slot without replacing the shared prompt body.
     - model: openai-codex/gpt-5.3-codex-spark:medium
