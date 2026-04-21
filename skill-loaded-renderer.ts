@@ -25,7 +25,7 @@ export function renderSkillLoaded(
 	container.addChild(new Spacer(1));
 
 	const box = new Box(1, 1, (text: string) => theme.bg("toolSuccessBg", text));
-	box.addChild(new Text(theme.fg("toolTitle", theme.bold(`⚡ Skill loaded: ${skillName}`)), 0, 0));
+	box.addChild(new Text(theme.fg("toolTitle", theme.bold(`Skill loaded: ${skillName}`)), 0, 0));
 	box.addChild(new Text(theme.fg("toolOutput", `   ${skillPath}`), 0, 0));
 	box.addChild(new Spacer(1));
 

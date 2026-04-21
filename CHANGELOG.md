@@ -2,10 +2,22 @@
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-04-21
+
+### Added
+- Added the packaged `prompt-template-authoring` skill for creating and maintaining prompt templates with this extension.
+
+### Changed
+- Tightened the shipped skill guide so it stays short, repo-specific, and aligned with the actual prompt-template runtime.
+
+### Fixed
+- Corrected the shipped skill examples for model fallback vs rotation, argument substitution, deterministic handoff behavior, chain context wording, runtime flag syntax, and prompt discovery rules.
+- Removed the emoji from the skill-loaded renderer so the UI copy matches the extension's plain-text style.
+
 ## [0.8.1] - 2026-04-21
 
 ### Added
-- Added agent skill `prompt-templates` for writing, managing, and running custom prompt templates. Registered in `package.json` under `pi.skills`.
+- Added agent skill `prompt-template-authoring` for writing, managing, and running custom prompt templates. Registered in `package.json` under `pi.skills`.
 
 ## [0.8.0] - 2026-04-21
 
