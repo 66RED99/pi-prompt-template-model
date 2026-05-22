@@ -1131,7 +1131,7 @@ test("queued run-prompt restores pending session state before executing queued c
 		const first = pi.commands.get("first");
 		assert.ok(first);
 		await first.handler("", ctx);
-		assert.deepEqual(pi.setModelCalls, ["anthropic/loop-first"]);
+		assert.deepEqual(pi.setModelCalls, ["anthropic/loop-first", "anthropic/base-model"]);
 
 		const promptTool = pi.commands.get("prompt-tool");
 		assert.ok(promptTool);
@@ -1142,7 +1142,7 @@ test("queued run-prompt restores pending session state before executing queued c
 		await runPromptTool.execute("tool-call-1", { command: "second" });
 
 		await pi.emit("agent_end", {}, ctx);
-		assert.deepEqual(pi.setModelCalls, ["anthropic/loop-first", "anthropic/base-model", "anthropic/loop-second"]);
+		assert.deepEqual(pi.setModelCalls, ["anthropic/loop-first", "anthropic/base-model", "anthropic/loop-second", "anthropic/base-model"]);
 	});
 });
 
@@ -1710,10 +1710,10 @@ test("session switch clears pending restore state", async () => {
 		const deslop = pi.commands.get("deslop");
 		assert.ok(deslop);
 		await deslop.handler("demo", ctx);
-		assert.deepEqual(pi.setModelCalls, ["anthropic/target-model"]);
+		assert.deepEqual(pi.setModelCalls, ["anthropic/target-model", "anthropic/base-model"]);
 			await pi.emit("session_start", { reason: "resume" }, ctx);
 		await pi.emit("agent_end", {}, ctx);
-		assert.deepEqual(pi.setModelCalls, ["anthropic/target-model"]);
+		assert.deepEqual(pi.setModelCalls, ["anthropic/target-model", "anthropic/base-model"]);
 	});
 });
 
@@ -2032,7 +2032,7 @@ test("--model flag overrides prompt model for single execution", async () => {
 		assert.ok(command);
 		await command.handler("--model=anthropic/claude-opus-4-6", ctx);
 
-		assert.deepEqual(pi.setModelCalls, ["anthropic/claude-opus-4-6"]);
+		assert.deepEqual(pi.setModelCalls, ["anthropic/claude-opus-4-6", "anthropic/claude-sonnet-4-20250514"]);
 		assert.deepEqual(pi.userMessages, ["review code"]);
 	});
 });

@@ -1604,12 +1604,17 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 
 		if (!shouldDelegatePrompt(effectivePrompt, subagent.override) && prompt.restore) {
 			const currentModel = getCurrentModel(ctx);
-			if (savedModel && currentModel && !sameModel(savedModel, currentModel)) {
-				previousModel = savedModel;
-				previousThinking = savedThinking;
-			}
-			if (effectivePrompt.thinking && previousThinking === undefined && effectivePrompt.thinking !== savedThinking) {
-				previousThinking = savedThinking;
+			const currentThinking = pi.getThinkingLevel();
+			const needsModelRestore = savedModel && currentModel && !sameModel(savedModel, currentModel);
+			const needsThinkingRestore = effectivePrompt.thinking && effectivePrompt.thinking !== savedThinking;
+			if (needsModelRestore || needsThinkingRestore) {
+				await restoreSessionState(
+					ctx,
+					needsModelRestore ? savedModel : undefined,
+					needsThinkingRestore ? savedThinking : undefined,
+					currentModel,
+					currentThinking,
+				);
 			}
 		}
 
