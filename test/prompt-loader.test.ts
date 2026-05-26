@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildPromptCommandDescription, loadPromptsWithModel, RESERVED_COMMAND_NAMES, resolveSkillPath } from "../prompt-loader.js";
+import { buildPromptCommandDescription, loadPromptsWithModel, RESERVED_COMMAND_NAMES } from "../prompt-loader.js";
 
 function withTempHome(run: (root: string) => void) {
 	const root = mkdtempSync(join(tmpdir(), "pi-prompt-template-model-"));
@@ -80,27 +80,26 @@ test("loadPromptsWithModel trims optional string frontmatter fields", () => {
 		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
 		writeFileSync(
 			join(cwd, ".pi", "prompts", "trimmed.md"),
-			'---\nmodel: claude-sonnet-4-20250514\ndescription: "  Trim me  "\nskill: "  tmux  "\nthinking: " high "\n---\nbody',
+			'---\nmodel: claude-sonnet-4-20250514\ndescription: "  Trim me  "\nthinking: " high "\n---\nbody',
 		);
 
 		const result = loadPromptsWithModel(cwd);
 		assert.equal(result.prompts.get("trimmed")?.description, "Trim me");
-		assert.equal(result.prompts.get("trimmed")?.skill, "tmux");
 		assert.equal(result.prompts.get("trimmed")?.thinking, "high");
 	});
 });
 
-test("loadPromptsWithModel allows non-chain prompts without model and defaults description to current", () => {
+test("loadPromptsWithModel allows prompts without model when they have extension features", () => {
 	withTempHome((root) => {
 		const cwd = join(root, "project");
 		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
-		writeFileSync(join(cwd, ".pi", "prompts", "inherit.md"), '---\ndescription: "inherit"\nskill: tmux\n---\nbody');
+		writeFileSync(join(cwd, ".pi", "prompts", "inherit.md"), '---\ndescription: "inherit"\nloop: 3\n---\nbody');
 
 		const result = loadPromptsWithModel(cwd);
 		const prompt = result.prompts.get("inherit");
 		assert.ok(prompt);
 		assert.deepEqual(prompt.models, []);
-		assert.equal(buildPromptCommandDescription(prompt), "inherit [current +tmux] (project)");
+		assert.equal(buildPromptCommandDescription(prompt), "inherit [current loop:3] (project)");
 	});
 });
 
@@ -112,21 +111,6 @@ test("loadPromptsWithModel ignores generic prompts without model or extension fe
 
 		const result = loadPromptsWithModel(cwd);
 		assert.equal(result.prompts.has("review"), false);
-	});
-});
-
-test("loadPromptsWithModel can include plain prompts for chain resolution without changing default loading", () => {
-	withTempHome((root) => {
-		const cwd = join(root, "project");
-		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
-		writeFileSync(join(cwd, ".pi", "prompts", "review.md"), '---\ndescription: "plain prompt"\n---\nbody');
-
-		const defaultResult = loadPromptsWithModel(cwd);
-		const chainResult = loadPromptsWithModel(cwd, true);
-
-		assert.equal(defaultResult.prompts.has("review"), false);
-		assert.equal(chainResult.prompts.get("review")?.content, "body");
-		assert.deepEqual(chainResult.prompts.get("review")?.models, []);
 	});
 });
 
@@ -324,20 +308,6 @@ test("loadPromptsWithModel parses boomerang frontmatter field", () => {
 	});
 });
 
-test("loadPromptsWithModel rejects boomerang on chain templates", () => {
-	withTempHome((root) => {
-		const cwd = join(root, "project");
-		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
-		writeFileSync(join(cwd, ".pi", "prompts", "chain-boomerang.md"), '---\nchain: "analyze -> fix"\nboomerang: true\n---\nignored');
-
-		const result = loadPromptsWithModel(cwd);
-		const prompt = result.prompts.get("chain-boomerang");
-		assert.ok(prompt);
-		assert.equal(prompt.boomerang, undefined);
-		assert.match(result.diagnostics.map((item) => item.message).join("\n"), /chain" and "boomerang" cannot be combined/i);
-	});
-});
-
 test("loadPromptsWithModel parses rotate frontmatter field on non-chain templates", () => {
 	withTempHome((root) => {
 		const cwd = join(root, "project");
@@ -346,20 +316,6 @@ test("loadPromptsWithModel parses rotate frontmatter field on non-chain template
 
 		const result = loadPromptsWithModel(cwd);
 		assert.equal(result.prompts.get("rotate")?.rotate, true);
-	});
-});
-
-test("loadPromptsWithModel ignores rotate on chain templates without diagnostics", () => {
-	withTempHome((root) => {
-		const cwd = join(root, "project");
-		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
-		writeFileSync(join(cwd, ".pi", "prompts", "chain-rotate.md"), '---\nchain: "analyze -> fix"\nrotate: true\n---\nignored');
-
-		const result = loadPromptsWithModel(cwd);
-		const prompt = result.prompts.get("chain-rotate");
-		assert.ok(prompt);
-		assert.equal(prompt.rotate, undefined);
-		assert.doesNotMatch(result.diagnostics.map((item) => item.message).join("\n"), /invalid rotate/i);
 	});
 });
 
@@ -499,167 +455,19 @@ test("loadPromptsWithModel normalizes converge frontmatter values", () => {
 	});
 });
 
-test("loadPromptsWithModel loads chain templates without model and description shows chain metadata", () => {
-	withTempHome((root) => {
-		const cwd = join(root, "project");
-		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
-		writeFileSync(
-			join(cwd, ".pi", "prompts", "review-and-clean.md"),
-			'---\nchain: "double-check --loop 2 -> deslop --loop 2"\ndescription: "Review then clean up slop"\n---\nignored',
-		);
-
-		const result = loadPromptsWithModel(cwd);
-		const prompt = result.prompts.get("review-and-clean");
-		assert.ok(prompt);
-		assert.equal(prompt.models.length, 0);
-		assert.equal(prompt.chain, "double-check --loop 2 -> deslop --loop 2");
-		assert.equal(buildPromptCommandDescription(prompt), "Review then clean up slop [chain: double-check --loop 2 -> deslop --loop 2] (project)");
-	});
-});
-
-test("loadPromptsWithModel ignores model/thinking/skill fields on chain templates without diagnostics", () => {
-	withTempHome((root) => {
-		const cwd = join(root, "project");
-		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
-		writeFileSync(
-			join(cwd, ".pi", "prompts", "chain-ignore.md"),
-			'---\nchain: "analyze -> fix"\nmodel: 123\nthinking: turbo\nskill: 42\n---\nignored',
-		);
-
-		const result = loadPromptsWithModel(cwd);
-		const prompt = result.prompts.get("chain-ignore");
-		assert.ok(prompt);
-		assert.equal(prompt.chain, "analyze -> fix");
-		assert.equal(prompt.models.length, 0);
-		assert.equal(prompt.thinking, undefined);
-		assert.equal(prompt.skill, undefined);
-
-		const diagnosticText = result.diagnostics.map((item) => item.message).join("\n");
-		assert.doesNotMatch(diagnosticText, /invalid model|empty model|invalid thinking|invalid skill/i);
-	});
-});
-
-test("loadPromptsWithModel stores loop/fresh/converge frontmatter on chain templates", () => {
-	withTempHome((root) => {
-		const cwd = join(root, "project");
-		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
-		writeFileSync(
-			join(cwd, ".pi", "prompts", "chain-flags.md"),
-			'---\nchain: "analyze -> fix"\nloop: 3\nfresh: true\nconverge: false\n---\nignored',
-		);
-
-		const result = loadPromptsWithModel(cwd);
-		const prompt = result.prompts.get("chain-flags");
-		assert.ok(prompt);
-		assert.equal(prompt.chain, "analyze -> fix");
-		assert.equal(prompt.loop, 3);
-		assert.equal(prompt.fresh, true);
-		assert.equal(prompt.converge, false);
-	});
-});
-
-test("loadPromptsWithModel stores chainContext summary on chain templates", () => {
-	withTempHome((root) => {
-		const cwd = join(root, "project");
-		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
-		writeFileSync(
-			join(cwd, ".pi", "prompts", "chain-context.md"),
-			'---\nchain: "analyze -> fix"\nchainContext: summary\n---\nignored',
-		);
-
-		const result = loadPromptsWithModel(cwd);
-		const prompt = result.prompts.get("chain-context");
-		assert.ok(prompt);
-		assert.equal(prompt.chainContext, "summary");
-	});
-});
-
-test("loadPromptsWithModel diagnoses invalid chainContext on chain templates", () => {
-	withTempHome((root) => {
-		const cwd = join(root, "project");
-		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
-		writeFileSync(
-			join(cwd, ".pi", "prompts", "chain-context-invalid.md"),
-			'---\nchain: "analyze -> fix"\nchainContext: full\n---\nignored',
-		);
-
-		const result = loadPromptsWithModel(cwd);
-		const prompt = result.prompts.get("chain-context-invalid");
-		assert.ok(prompt);
-		assert.equal(prompt.chainContext, undefined);
-		assert.match(result.diagnostics.map((item) => item.message).join("\n"), /frontmatter field "chainContext" must be "summary"/i);
-	});
-});
-
-test("buildPromptCommandDescription includes chain summary context label", () => {
-	withTempHome((root) => {
-		const cwd = join(root, "project");
-		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
-		writeFileSync(
-			join(cwd, ".pi", "prompts", "chain-context-description.md"),
-			'---\nchain: "analyze -> fix"\nchainContext: summary\n---\nignored',
-		);
-
-		const result = loadPromptsWithModel(cwd);
-		const prompt = result.prompts.get("chain-context-description");
-		assert.ok(prompt);
-		assert.equal(buildPromptCommandDescription(prompt), "[chain: analyze -> fix summary] (project)");
-	});
-});
-
-test("loadPromptsWithModel diagnoses invalid chain frontmatter values", () => {
-	withTempHome((root) => {
-		const cwd = join(root, "project");
-		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
-		writeFileSync(join(cwd, ".pi", "prompts", "chain-number.md"), "---\nmodel: claude-sonnet-4-20250514\nchain: 123\n---\nbody");
-		writeFileSync(join(cwd, ".pi", "prompts", "chain-empty.md"), '---\nmodel: claude-sonnet-4-20250514\nchain: "   "\n---\nbody');
-
-		const result = loadPromptsWithModel(cwd);
-		const diagnosticText = result.diagnostics.map((item) => item.message).join("\n");
-		assert.match(diagnosticText, /frontmatter field "chain" must be a string/i);
-		assert.match(diagnosticText, /frontmatter field "chain" must be a non-empty string/i);
-	});
-});
-
-test("loadPromptsWithModel rejects invalid parallel() chain declarations in frontmatter", () => {
-	withTempHome((root) => {
-		const cwd = join(root, "project");
-		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
-		writeFileSync(join(cwd, ".pi", "prompts", "parallel-empty.md"), '---\nchain: "parallel() -> review"\n---\nignored');
-		writeFileSync(join(cwd, ".pi", "prompts", "parallel-nested.md"), '---\nchain: "parallel(scan, parallel(review))"\n---\nignored');
-
-		const result = loadPromptsWithModel(cwd);
-		assert.equal(result.prompts.has("parallel-empty"), false);
-		assert.equal(result.prompts.has("parallel-nested"), false);
-		const diagnostics = result.diagnostics.map((item) => item.message).join("\n");
-		assert.match(diagnostics, /invalid chain declaration segment/i);
-	});
-});
-
-test("loadPromptsWithModel accepts single-item parallel() declarations", () => {
-	withTempHome((root) => {
-		const cwd = join(root, "project");
-		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
-		writeFileSync(join(cwd, ".pi", "prompts", "parallel-single.md"), '---\nchain: "parallel(scan-fe)"\n---\nignored');
-
-		const result = loadPromptsWithModel(cwd);
-		assert.equal(result.prompts.get("parallel-single")?.chain, "parallel(scan-fe)");
-	});
-});
-
 test("buildPromptCommandDescription includes loop metadata", () => {
 	withTempHome((root) => {
 		const cwd = join(root, "project");
 		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
 		writeFileSync(
 			join(cwd, ".pi", "prompts", "deslop.md"),
-			'---\nmodel: claude-sonnet-4-20250514\ndescription: "Deslop"\nskill: tmux\nloop: 5\n---\nbody',
+			'---\nmodel: claude-sonnet-4-20250514\ndescription: "Deslop"\nloop: 5\n---\nbody',
 		);
 
 		const result = loadPromptsWithModel(cwd);
 		const prompt = result.prompts.get("deslop");
 		assert.ok(prompt);
-		assert.equal(buildPromptCommandDescription(prompt), "Deslop [claude-sonnet-4-20250514 +tmux loop:5] (project)");
+		assert.equal(buildPromptCommandDescription(prompt), "Deslop [claude-sonnet-4-20250514 loop:5] (project)");
 	});
 });
 
@@ -702,14 +510,11 @@ test("loadPromptsWithModel rejects invalid inheritContext combinations", () => {
 	withTempHome((root) => {
 		const cwd = join(root, "project");
 		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
-		writeFileSync(join(cwd, ".pi", "prompts", "chain-delegated.md"), '---\nchain: worker\nsubagent: true\n---\nignored');
 		writeFileSync(join(cwd, ".pi", "prompts", "inherit-only.md"), '---\nmodel: claude-sonnet-4-20250514\ninheritContext: true\n---\nbody');
 
 		const result = loadPromptsWithModel(cwd);
-		assert.equal(result.prompts.get("chain-delegated")?.subagent, undefined);
 		assert.equal(result.prompts.get("inherit-only")?.inheritContext, undefined);
 		const diagnostics = result.diagnostics.map((item) => item.message).join("\n");
-		assert.match(diagnostics, /cannot be combined/i);
 		assert.match(diagnostics, /requires "subagent"/i);
 	});
 });
@@ -797,52 +602,6 @@ test("loadPromptsWithModel expands tilde-prefixed cwd values", () => {
 	});
 });
 
-test("loadPromptsWithModel stores cwd on chain templates", () => {
-	withTempHome((root) => {
-		const cwd = join(root, "project");
-		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
-		writeFileSync(
-			join(cwd, ".pi", "prompts", "chain-cwd.md"),
-			'---\nchain: "analyze -> fix"\ncwd: /tmp/nfd\n---\nignored',
-		);
-
-		const result = loadPromptsWithModel(cwd);
-		const prompt = result.prompts.get("chain-cwd");
-		assert.ok(prompt);
-		assert.equal(prompt.cwd, "/tmp/nfd");
-		assert.equal(buildPromptCommandDescription(prompt), "[chain: analyze -> fix cwd:/tmp/nfd] (project)");
-	});
-});
-
-test("resolveSkillPath searches project .pi, ancestor .agents, then global skills", () => {
-	withTempHome((root) => {
-		const repoRoot = join(root, "repo");
-		const cwd = join(repoRoot, "apps", "web");
-		mkdirSync(join(repoRoot, ".git"), { recursive: true });
-		mkdirSync(join(repoRoot, ".agents", "skills", "from-agents"), { recursive: true });
-		mkdirSync(join(cwd, ".pi", "skills"), { recursive: true });
-		mkdirSync(join(root, ".pi", "agent", "skills", "from-global"), { recursive: true });
-		writeFileSync(join(repoRoot, ".agents", "skills", "from-agents", "SKILL.md"), "agents skill");
-		writeFileSync(join(cwd, ".pi", "skills", "from-project.md"), "project skill");
-		writeFileSync(join(root, ".pi", "agent", "skills", "from-global", "SKILL.md"), "global skill");
-
-		assert.equal(resolveSkillPath("from-project", cwd), join(cwd, ".pi", "skills", "from-project.md"));
-		assert.equal(resolveSkillPath("from-agents", cwd), join(repoRoot, ".agents", "skills", "from-agents", "SKILL.md"));
-		assert.equal(resolveSkillPath("from-global", cwd), join(root, ".pi", "agent", "skills", "from-global", "SKILL.md"));
-	});
-});
-
-test("resolveSkillPath falls back to ~/.agents/skills", () => {
-	withTempHome((root) => {
-		const cwd = join(root, "project");
-		mkdirSync(cwd, { recursive: true });
-		mkdirSync(join(root, ".agents", "skills"), { recursive: true });
-		writeFileSync(join(root, ".agents", "skills", "from-legacy.md"), "legacy skill");
-
-		assert.equal(resolveSkillPath("from-legacy", cwd), join(root, ".agents", "skills", "from-legacy.md"));
-	});
-});
-
 test("loadPromptsWithModel validates parallel/worktree frontmatter combinations", () => {
 	withTempHome((root) => {
 		const cases = [
@@ -879,16 +638,6 @@ test("loadPromptsWithModel validates parallel/worktree frontmatter combinations"
 				},
 			},
 			{
-				name: "chain-parallel-field",
-				content: '---\nchain: "review -> fix"\nparallel: 3\n---\nignored',
-				check(result: ReturnType<typeof loadPromptsWithModel>) {
-					const prompt = result.prompts.get("chain-parallel-field");
-					assert.ok(prompt);
-					assert.equal(prompt.parallel, undefined);
-					assert.ok(result.diagnostics.some((d) => d.message.includes("parallel") && d.message.includes('cannot be combined with "chain"')));
-				},
-			},
-			{
 				name: "parallel-worktree",
 				content: '---\nmodel: claude-sonnet-4-20250514\nsubagent: simplifier\nparallel: 3\nworktree: true\n---\nbody',
 				check(result: ReturnType<typeof loadPromptsWithModel>) {
@@ -912,16 +661,6 @@ test("loadPromptsWithModel validates parallel/worktree frontmatter combinations"
 				},
 			},
 			{
-				name: "wt-pipeline",
-				content: '---\nchain: "parallel(scan-fe, scan-be) -> review"\nworktree: true\n---\nignored',
-				check(result: ReturnType<typeof loadPromptsWithModel>) {
-					const prompt = result.prompts.get("wt-pipeline");
-					assert.ok(prompt);
-					assert.equal(prompt.worktree, true);
-					assert.equal(result.diagnostics.filter((d) => d.message.includes("worktree")).length, 0);
-				},
-			},
-			{
 				name: "plain",
 				content: '---\nmodel: claude-sonnet-4-20250514\nworktree: true\n---\nbody',
 				check(result: ReturnType<typeof loadPromptsWithModel>) {
@@ -929,44 +668,6 @@ test("loadPromptsWithModel validates parallel/worktree frontmatter combinations"
 					assert.ok(prompt);
 					assert.equal(prompt.worktree, undefined);
 					assert.ok(result.diagnostics.some((d) => d.message.includes("worktree") && d.message.includes("requires")));
-				},
-			},
-			{
-				name: "seq-chain",
-				content: '---\nchain: "analyze -> fix"\nworktree: true\n---\nignored',
-				check(result: ReturnType<typeof loadPromptsWithModel>) {
-					const prompt = result.prompts.get("seq-chain");
-					assert.ok(prompt);
-					assert.equal(prompt.worktree, undefined);
-					assert.ok(result.diagnostics.some((d) => d.message.includes("worktree") && d.message.includes("parallel")));
-				},
-			},
-			{
-				name: "bad-wt",
-				content: '---\nchain: "parallel(a, b) -> c"\nworktree: 42\n---\nignored',
-				check(result: ReturnType<typeof loadPromptsWithModel>) {
-					const prompt = result.prompts.get("bad-wt");
-					assert.ok(prompt);
-					assert.equal(prompt.worktree, undefined);
-					assert.ok(result.diagnostics.some((d) => d.message.includes("worktree") && d.message.includes("must be true or false")));
-				},
-			},
-			{
-				name: "wt-only",
-				content: '---\nchain: "parallel(a, b)"\nworktree: true\n---\nignored',
-				check(result: ReturnType<typeof loadPromptsWithModel>) {
-					assert.ok(result.prompts.has("wt-only"));
-				},
-			},
-			{
-				name: "wt-desc",
-				content: '---\nchain: "parallel(scan-fe, scan-be) -> review"\nworktree: true\ndescription: "Parallel scan"\n---\nignored',
-				check(result: ReturnType<typeof loadPromptsWithModel>) {
-					const prompt = result.prompts.get("wt-desc");
-					assert.ok(prompt);
-					const desc = buildPromptCommandDescription(prompt);
-					assert.match(desc, /worktree/);
-					assert.match(desc, /\[chain:.*worktree\]/);
 				},
 			},
 		] as const;
@@ -1242,7 +943,6 @@ test("loadPromptsWithModel validates bestOfN compare lineups and cutover diagnos
 
 test("reserved built-in command mirror is explicit", () => {
 	assert.deepEqual([...RESERVED_COMMAND_NAMES].sort(), [
-		"chain-prompts",
 		"changelog",
 		"compact",
 		"copy",

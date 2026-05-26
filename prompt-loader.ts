@@ -1,13 +1,11 @@
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import type { ThinkingLevel } from "@mariozechner/pi-agent-core";
 import { parseFrontmatter } from "@mariozechner/pi-coding-agent";
-import { parseChainDeclaration } from "./chain-parser.js";
 
 const VALID_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
 export const RESERVED_COMMAND_NAMES = new Set([
-	"chain-prompts",
 	"prompt-tool",
 	"settings",
 	"model",
@@ -64,10 +62,7 @@ export interface PromptWithModel {
 	description: string;
 	content: string;
 	models: string[];
-	chain?: string;
-	chainContext?: "summary";
 	restore: boolean;
-	skill?: string;
 	thinking?: ThinkingLevel;
 	thinkingLevels?: ThinkingLevel[];
 	rotate?: boolean;
@@ -1220,61 +1215,6 @@ function normalizeInheritContext(
 	return false;
 }
 
-function normalizeChain(
-	value: unknown,
-	filePath: string,
-	source: PromptSource,
-	diagnostics: PromptLoaderDiagnostic[],
-): string | undefined {
-	if (value === undefined) return undefined;
-	if (typeof value !== "string") {
-		diagnostics.push(
-			createDiagnostic(
-				"invalid-chain",
-				filePath,
-				source,
-				`Ignoring invalid chain value in ${filePath}: frontmatter field "chain" must be a string.`,
-			),
-		);
-		return undefined;
-	}
-
-	const normalized = value.trim();
-	if (normalized.length > 0) return normalized;
-
-	diagnostics.push(
-		createDiagnostic(
-			"empty-chain",
-			filePath,
-			source,
-			`Ignoring invalid chain value in ${filePath}: frontmatter field "chain" must be a non-empty string.`,
-		),
-	);
-	return undefined;
-}
-
-function normalizeChainContext(
-	value: unknown,
-	filePath: string,
-	source: PromptSource,
-	diagnostics: PromptLoaderDiagnostic[],
-): "summary" | undefined {
-	if (value === undefined) return undefined;
-	if (typeof value === "string") {
-		const normalized = value.trim().toLowerCase();
-		if (normalized === "summary") return "summary";
-	}
-
-	diagnostics.push(
-		createDiagnostic(
-			"invalid-chain-context",
-			filePath,
-			source,
-			`Ignoring invalid chainContext value in ${filePath}: frontmatter field "chainContext" must be "summary".`,
-		),
-	);
-	return undefined;
-}
 
 function normalizeThinking(
 	value: unknown,
@@ -1428,24 +1368,38 @@ function loadPromptsWithModelFromDir(
 				const frontmatter = normalizeFrontmatterRecord(parsed.frontmatter, fullPath, source, diagnostics);
 				if (!frontmatter) continue;
 				const { body } = parsed;
-				const chain = normalizeChain(frontmatter.chain, fullPath, source, diagnostics);
-				let parsedChainDeclarationResult:
-					| ReturnType<typeof parseChainDeclaration>
-					| undefined;
-				const chainContext = chain ? normalizeChainContext(frontmatter.chainContext, fullPath, source, diagnostics) : undefined;
-				if (chain && /\bparallel\s*\(/.test(chain)) {
-					parsedChainDeclarationResult = parseChainDeclaration(chain);
-					if (parsedChainDeclarationResult.invalidSegments.length > 0 || parsedChainDeclarationResult.steps.length === 0) {
-						diagnostics.push(
-							createDiagnostic(
-								"invalid-chain-declaration",
-								fullPath,
-								source,
-								`Skipping prompt template at ${fullPath}: invalid chain declaration segment ${JSON.stringify(parsedChainDeclarationResult.invalidSegments[0] ?? chain)}.`,
-							),
-						);
-						continue;
-					}
+				if (frontmatter.chain !== undefined) {
+					diagnostics.push(
+						createDiagnostic(
+							"unsupported-field",
+							fullPath,
+							source,
+							`Skipping prompt template at ${fullPath}: frontmatter field "chain" is no longer supported.`,
+						),
+					);
+					continue;
+				}
+				if (frontmatter.skill !== undefined) {
+					diagnostics.push(
+						createDiagnostic(
+							"unsupported-field",
+							fullPath,
+							source,
+							`Skipping prompt template at ${fullPath}: frontmatter field "skill" is no longer supported.`,
+						),
+					);
+					continue;
+				}
+				if (frontmatter.chainContext !== undefined) {
+					diagnostics.push(
+						createDiagnostic(
+							"unsupported-field",
+							fullPath,
+							source,
+							`Skipping prompt template at ${fullPath}: frontmatter field "chainContext" is no longer supported.`,
+						),
+					);
+					continue;
 				}
 				let subagent = normalizeSubagent(frontmatter.subagent, fullPath, source, diagnostics);
 				const cwd = normalizeCwd(frontmatter.cwd, fullPath, source, diagnostics);
@@ -1483,41 +1437,6 @@ function loadPromptsWithModelFromDir(
 				let safeWorkers = workers;
 				let safeReviewers = reviewers;
 				let safeFinalApplier = finalApplier;
-				if (chain && subagent !== undefined) {
-					diagnostics.push(
-						createDiagnostic(
-							"invalid-subagent-chain",
-							fullPath,
-							source,
-							`Ignoring subagent in ${fullPath}: frontmatter fields "chain" and "subagent" cannot be combined.`,
-						),
-					);
-					subagent = undefined;
-				}
-				if (chain && deterministic !== undefined) {
-					diagnostics.push(
-						createDiagnostic(
-							"invalid-deterministic-chain",
-							fullPath,
-							source,
-							`Ignoring deterministic config in ${fullPath}: frontmatter field "deterministic" cannot be combined with "chain".`,
-						),
-					);
-					deterministic = undefined;
-				}
-				if (chain && (safeWorkers !== undefined || safeReviewers !== undefined || safeFinalApplier !== undefined)) {
-					diagnostics.push(
-						createDiagnostic(
-							"invalid-lineup-chain",
-							fullPath,
-							source,
-							`Ignoring compare lineup config in ${fullPath}: frontmatter fields "workers"/"reviewers"/"finalApplier" cannot be combined with "chain".`,
-						),
-					);
-					safeWorkers = undefined;
-					safeReviewers = undefined;
-					safeFinalApplier = undefined;
-				}
 				if (subagent !== undefined && (safeWorkers !== undefined || safeReviewers !== undefined || safeFinalApplier !== undefined)) {
 					diagnostics.push(
 						createDiagnostic(
@@ -1553,17 +1472,6 @@ function loadPromptsWithModelFromDir(
 					);
 				}
 				let safeParallel = parallel;
-				if (safeParallel !== undefined && chain) {
-					diagnostics.push(
-						createDiagnostic(
-							"invalid-parallel",
-							fullPath,
-							source,
-							`Ignoring parallel in ${fullPath}: frontmatter field "parallel" cannot be combined with "chain".`,
-						),
-					);
-					safeParallel = undefined;
-				}
 				if (safeParallel !== undefined && subagent === undefined) {
 					diagnostics.push(
 						createDiagnostic(
@@ -1622,7 +1530,7 @@ function loadPromptsWithModelFromDir(
 					);
 					continue;
 				}
-				if (!chain && subagent === undefined && !hasLineup && cwd) {
+				if (subagent === undefined && !hasLineup && cwd) {
 					if (deterministic) {
 						deterministic = { ...deterministic, ...(deterministic.cwd ? {} : { cwd }) };
 					} else {
@@ -1631,16 +1539,16 @@ function loadPromptsWithModelFromDir(
 								"invalid-cwd",
 								fullPath,
 								source,
-								`Ignoring cwd in ${fullPath}: frontmatter field "cwd" requires "subagent", "chain", or compare lineups ("workers"/"reviewers"/"finalApplier").`,
+								`Ignoring cwd in ${fullPath}: frontmatter field "cwd" requires "subagent" or compare lineups ("workers"/"reviewers"/"finalApplier").`,
 							),
 						);
 					}
 				}
 				const hasModelField = Object.hasOwn(frontmatter, "model");
-				const parsedModels = chain ? [] : normalizeModelSpecs(frontmatter.model, fullPath, source, diagnostics);
-				if (!chain && hasModelField && !parsedModels) continue;
-				const models = chain ? [] : (parsedModels ?? []);
-				const rotate = chain ? false : normalizeRotate(frontmatter.rotate, fullPath, source, diagnostics);
+				const parsedModels = normalizeModelSpecs(frontmatter.model, fullPath, source, diagnostics);
+				if (hasModelField && !parsedModels) continue;
+				const models = parsedModels ?? [];
+				const rotate = normalizeRotate(frontmatter.rotate, fullPath, source, diagnostics);
 
 				const name = entry.name.slice(0, -3);
 				if (RESERVED_COMMAND_NAMES.has(name)) {
@@ -1656,34 +1564,20 @@ function loadPromptsWithModelFromDir(
 				}
 
 				const safeInheritContext = subagent !== undefined && inheritContext;
-				const safeCwd = (chain || subagent !== undefined || hasLineup) ? cwd : undefined;
+				const safeCwd = (subagent !== undefined || hasLineup) ? cwd : undefined;
 				const description = normalizeStringField("description", frontmatter.description, fullPath, source, diagnostics) ?? "";
-				const skill = chain ? undefined : normalizeStringField("skill", frontmatter.skill, fullPath, source, diagnostics);
 				let thinking: ThinkingLevel | undefined;
 				let thinkingLevels: ThinkingLevel[] | undefined;
-				if (!chain) {
-					if (rotate && typeof frontmatter.thinking === "string" && frontmatter.thinking.includes(",")) {
-						thinkingLevels = normalizeThinkingLevels(frontmatter.thinking, models.length, fullPath, source, diagnostics);
-					} else {
-						thinking = normalizeThinking(frontmatter.thinking, fullPath, source, diagnostics);
-					}
+				if (rotate && typeof frontmatter.thinking === "string" && frontmatter.thinking.includes(",")) {
+					thinkingLevels = normalizeThinkingLevels(frontmatter.thinking, models.length, fullPath, source, diagnostics);
+				} else {
+					thinking = normalizeThinking(frontmatter.thinking, fullPath, source, diagnostics);
 				}
 				const restore = normalizeRestore(frontmatter.restore, fullPath, source, diagnostics);
 				const fresh = normalizeFresh(frontmatter.fresh, fullPath, source, diagnostics);
 				const loop = normalizeLoop(frontmatter.loop, fullPath, source, diagnostics);
 				const converge = normalizeConverge(frontmatter.converge, fullPath, source, diagnostics);
-				let boomerang = normalizeBoomerang(frontmatter.boomerang, fullPath, source, diagnostics);
-				if (chain && boomerang) {
-					diagnostics.push(
-						createDiagnostic(
-							"invalid-boomerang-chain",
-							fullPath,
-							source,
-							`Ignoring boomerang in ${fullPath}: frontmatter fields "chain" and "boomerang" cannot be combined.`,
-						),
-					);
-					boomerang = false;
-				}
+				const boomerang = normalizeBoomerang(frontmatter.boomerang, fullPath, source, diagnostics);
 				if (loop !== undefined && deterministic !== undefined) {
 					diagnostics.push(
 						createDiagnostic(
@@ -1699,22 +1593,7 @@ function loadPromptsWithModelFromDir(
 				const worktree = normalizeWorktree(worktreeInput, fullPath, source, diagnostics);
 				let safeWorktree: boolean | undefined;
 				if (worktree) {
-					if (chain) {
-						const parsedChain = parsedChainDeclarationResult ?? parseChainDeclaration(chain);
-						const hasParallelStep = parsedChain.steps.some((step) => "parallel" in step);
-						if (parsedChain.invalidSegments.length > 0 || parsedChain.steps.length === 0 || !hasParallelStep) {
-							diagnostics.push(
-								createDiagnostic(
-									"invalid-worktree",
-									fullPath,
-									source,
-									`Ignoring worktree in ${fullPath}: frontmatter field "worktree" requires either "chain" with at least one parallel() step, "subagent" with frontmatter field "parallel", or compare lineups ("workers"/"reviewers"/"finalApplier").`,
-								),
-							);
-						} else {
-							safeWorktree = true;
-						}
-					} else if (subagent !== undefined && safeParallel !== undefined) {
+					if (subagent !== undefined && safeParallel !== undefined) {
 						safeWorktree = true;
 					} else if (hasLineup) {
 						safeWorktree = true;
@@ -1724,14 +1603,13 @@ function loadPromptsWithModelFromDir(
 								"invalid-worktree",
 								fullPath,
 								source,
-								`Ignoring worktree in ${fullPath}: frontmatter field "worktree" requires either "chain" with at least one parallel() step, "subagent" with frontmatter field "parallel", or compare lineups ("workers"/"reviewers"/"finalApplier").`,
+								`Ignoring worktree in ${fullPath}: frontmatter field "worktree" requires "subagent" with frontmatter field "parallel", or compare lineups ("workers"/"reviewers"/"finalApplier").`,
 							),
 						);
 					}
 				}
 				const hasModelConditionalDirectives = /<if-model(?:\s|>)|<else(?:\s|>)|<\/if-model\s*>|<\/else(?:\s|>)/.test(body);
 				const hasExtensionSpecificConfig =
-					skill !== undefined ||
 					thinking !== undefined ||
 					fresh === true ||
 					loop !== undefined ||
@@ -1744,7 +1622,7 @@ function loadPromptsWithModelFromDir(
 					subagent !== undefined ||
 					safeInheritContext ||
 					hasModelConditionalDirectives;
-				if (!chain && !hasModelField && !hasExtensionSpecificConfig && !includePlainPrompts) {
+				if (!hasModelField && !hasExtensionSpecificConfig && !includePlainPrompts) {
 					continue;
 				}
 
@@ -1753,10 +1631,7 @@ function loadPromptsWithModelFromDir(
 					description,
 					content: body,
 					models,
-					chain: chain || undefined,
-					chainContext,
 					restore,
-					skill,
 					thinking,
 					thinkingLevels,
 					rotate: rotate || undefined,
@@ -1851,16 +1726,8 @@ function effectiveLineupCount(slots: DelegationLineupSlot[] | undefined): number
 
 export function buildPromptCommandDescription(prompt: PromptWithModel): string {
 	const sourceLabel = prompt.subdir ? `(${prompt.source}:${prompt.subdir})` : `(${prompt.source})`;
-	if (prompt.chain) {
-		const chainContextLabel = prompt.chainContext ? ` ${prompt.chainContext}` : "";
-		const cwdLabel = prompt.cwd ? ` cwd:${prompt.cwd}` : "";
-		const worktreeLabel = prompt.worktree ? " worktree" : "";
-		const details = `[chain: ${prompt.chain}${chainContextLabel}${cwdLabel}${worktreeLabel}] ${sourceLabel}`;
-		return prompt.description ? `${prompt.description} ${details}` : details;
-	}
 	const modelLabel = prompt.models.length > 0 ? prompt.models.map((model) => model.split("/").pop() || model).join("|") : "current";
 	const rotateLabel = prompt.rotate ? " rotate" : "";
-	const skillLabel = prompt.skill ? ` +${prompt.skill}` : "";
 	const thinkingValue = prompt.thinkingLevels ? prompt.thinkingLevels.join(",") : prompt.thinking;
 	const thinkingLabel = thinkingValue ? ` ${thinkingValue}` : "";
 	const loopLabel = prompt.loop !== undefined ? ` loop:${prompt.loop === null ? "unlimited" : prompt.loop}` : "";
@@ -1875,58 +1742,7 @@ export function buildPromptCommandDescription(prompt: PromptWithModel): string {
 	const inheritContextLabel = prompt.inheritContext ? " fork" : "";
 	const worktreeLabel = prompt.worktree ? " worktree" : "";
 	const details =
-		`[${modelLabel}${rotateLabel}${thinkingLabel}${skillLabel}${loopLabel}${boomerangLabel}${subagentLabel}${parallelLabel}${deterministicLabel}${workersLabel}${reviewersLabel}${finalApplierLabel}${cwdLabel}${inheritContextLabel}${worktreeLabel}] ${sourceLabel}`;
+		`[${modelLabel}${rotateLabel}${thinkingLabel}${loopLabel}${boomerangLabel}${subagentLabel}${parallelLabel}${deterministicLabel}${workersLabel}${reviewersLabel}${finalApplierLabel}${cwdLabel}${inheritContextLabel}${worktreeLabel}] ${sourceLabel}`;
 	return prompt.description ? `${prompt.description} ${details}` : details;
 }
 
-function getSkillCandidates(baseDir: string, skillName: string): string[] {
-	return [join(baseDir, skillName, "SKILL.md"), join(baseDir, `${skillName}.md`)];
-}
-
-function* walkAncestors(startDir: string, stopDir?: string): Generator<string> {
-	let current = startDir;
-	while (true) {
-		yield current;
-		if (stopDir && current === stopDir) return;
-		const parent = dirname(current);
-		if (parent === current) return;
-		current = parent;
-	}
-}
-
-function findRepoRoot(startDir: string): string | undefined {
-	for (const dir of walkAncestors(startDir)) {
-		if (existsSync(join(dir, ".git"))) return dir;
-	}
-	return undefined;
-}
-
-function findFirstExisting(paths: string[]): string | undefined {
-	for (const path of paths) {
-		if (existsSync(path)) return path;
-	}
-	return undefined;
-}
-
-export function resolveSkillPath(skillName: string, cwd: string): string | undefined {
-	const projectDir = resolve(cwd);
-
-	const projectPiSkill = findFirstExisting(getSkillCandidates(resolve(projectDir, ".pi", "skills"), skillName));
-	if (projectPiSkill) return projectPiSkill;
-
-	const repoRoot = findRepoRoot(projectDir);
-	for (const dir of walkAncestors(projectDir, repoRoot)) {
-		const projectAgentsSkill = findFirstExisting(getSkillCandidates(join(dir, ".agents", "skills"), skillName));
-		if (projectAgentsSkill) return projectAgentsSkill;
-	}
-
-	const globalPiSkill = findFirstExisting(getSkillCandidates(join(homedir(), ".pi", "agent", "skills"), skillName));
-	if (globalPiSkill) return globalPiSkill;
-
-	return findFirstExisting(getSkillCandidates(join(homedir(), ".agents", "skills"), skillName));
-}
-
-export function readSkillContent(skillPath: string): string {
-	const raw = readFileSync(skillPath, "utf-8");
-	return parseFrontmatter(raw).body;
-}

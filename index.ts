@@ -4,19 +4,16 @@ import type { Model } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import type { ThinkingLevel } from "@mariozechner/pi-agent-core";
 import {
-	extractChainContextFlag,
 	extractLineupOverrides,
 	extractLoopCount,
 	extractLoopFlags,
 	extractSubagentOverride,
-	extractWorktreeFlag,
 	parseCommandArgs,
 	substituteArgs,
 	type LineupOverrideAction,
 	type SubagentOverride,
 } from "./args.js";
-import { parseChainSteps, parseChainDeclaration, type ChainStep, type ChainStepOrParallel, type ParallelChainStep } from "./chain-parser.js";
-import { generateBoomerangSummary, generateChainStepSummary, generateIterationSummary, didIterationMakeChanges, getIterationEntries, wasIterationAborted } from "./loop-utils.js";
+import { generateBoomerangSummary, generateIterationSummary, didIterationMakeChanges, getIterationEntries, wasIterationAborted } from "./loop-utils.js";
 import { selectModelCandidate } from "./model-selection.js";
 import { notify, summarizePromptDiagnostics, diagnosticsFingerprint } from "./notifications.js";
 import { preparePromptExecution, renderPromptForResolvedModel } from "./prompt-execution.js";
@@ -24,13 +21,9 @@ import {
 	buildPromptCommandDescription,
 	expandCwdPath,
 	loadPromptsWithModel,
-	readSkillContent,
-	resolveSkillPath,
 	type DelegationLineupSlot,
 	type PromptWithModel,
 } from "./prompt-loader.js";
-import { renderSkillLoaded, type SkillLoadedDetails } from "./skill-loaded-renderer.js";
-import { createToolManager } from "./tool-manager.js";
 import { executeSubagentPromptStep, type DelegatedPromptParallelResult } from "./subagent-step.js";
 import { DEFAULT_SUBAGENT_NAME, PROMPT_TEMPLATE_SUBAGENT_MESSAGE_TYPE } from "./subagent-runtime.js";
 import { renderDelegatedSubagentResult } from "./subagent-renderer.js";
@@ -61,18 +54,6 @@ interface BoomerangCollapse {
 	task: string;
 	previousSummaries: string[];
 }
-
-interface PendingSkillMessage {
-	customType: "skill-loaded";
-	content: string;
-	display: true;
-	details: SkillLoadedDetails;
-}
-
-type SkillMessageResolution =
-	| { kind: "none" }
-	| { kind: "ready"; message: PendingSkillMessage }
-	| { kind: "error"; error: string };
 
 interface ExecutionErrorState {
 	hasError: boolean;
@@ -106,28 +87,15 @@ const DEFAULT_COMPARE_FINAL_APPLIER_TASK = [
 
 export default function promptModelExtension(pi: ExtensionAPI) {
 	let prompts = new Map<string, PromptWithModel>();
-	let chainPrompts = new Map<string, PromptWithModel>();
 	let previousModel: Model<any> | undefined;
 	let previousThinking: ThinkingLevel | undefined;
-	let pendingSkillMessage: PendingSkillMessage | undefined;
 	let runtimeModel: Model<any> | undefined;
-	let chainActive = false;
 	let loopState: LoopState | null = null;
 	let freshCollapse: FreshCollapse | null = null;
 	let boomerangCollapse: BoomerangCollapse | null = null;
 	let accumulatedSummaries: string[] = [];
 	let lastDiagnostics = "";
-	let storedCommandCtx: ExtensionCommandContext | null = null;
 	const UNLIMITED_LOOP_CAP = 999;
-
-	const toolManager = createToolManager(pi, {
-		isActive: () => !!(loopState || chainActive),
-		getStoredCtx: () => storedCommandCtx,
-		setStoredCtx: (ctx) => {
-			storedCommandCtx = ctx;
-		},
-		executeCommand: executeToolCommand,
-	});
 
 	function sameModel(a: Model<any> | undefined, b: Model<any> | undefined): boolean {
 		if (!a || !b) return a === b;
@@ -138,7 +106,6 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		return runtimeModel ?? ctx.model;
 	}
 
-	pi.registerMessageRenderer<SkillLoadedDetails>("skill-loaded", renderSkillLoaded);
 	pi.registerMessageRenderer(PROMPT_TEMPLATE_SUBAGENT_MESSAGE_TYPE, renderDelegatedSubagentResult);
 	pi.registerMessageRenderer(PROMPT_TEMPLATE_DETERMINISTIC_MESSAGE_TYPE, renderDeterministicResult);
 	pi.registerMessageRenderer(PROMPT_TEMPLATE_DETERMINISTIC_COMPLETION_MESSAGE_TYPE, renderDeterministicCompletion);
@@ -154,9 +121,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 
 	function refreshPrompts(cwd: string, ctx?: ExtensionContext) {
 		const result = loadPromptsWithModel(cwd);
-		const chainResult = loadPromptsWithModel(cwd, true);
 		prompts = result.prompts;
-		chainPrompts = chainResult.prompts;
 
 		for (const name of prompts.keys()) {
 			registerPromptCommand(name);
@@ -170,77 +135,6 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		lastDiagnostics = fingerprint;
 	}
 
-	function consumePendingSkillMessage() {
-		if (!pendingSkillMessage) return undefined;
-		const message = pendingSkillMessage;
-		pendingSkillMessage = undefined;
-		return message;
-	}
-
-	function normalizeSkillName(skillName: string): string {
-		return skillName.startsWith("skill:") ? skillName.slice("skill:".length) : skillName;
-	}
-
-	function isPathResolvableSkillName(skillName: string): boolean {
-		if (skillName === "." || skillName === "..") return false;
-		if (skillName.includes("/")) return false;
-		if (skillName.includes("\\")) return false;
-		return true;
-	}
-
-	function resolveRegisteredSkillPath(skillName: string): string | undefined {
-		const normalizedSkillName = normalizeSkillName(skillName);
-		if (!normalizedSkillName) return undefined;
-		const candidates = new Set([normalizedSkillName, `skill:${normalizedSkillName}`]);
-
-		for (const command of pi.getCommands()) {
-			if (command.source !== "skill") continue;
-			const sourceInfo = "sourceInfo" in command
-				? (command as { sourceInfo?: { path?: string } }).sourceInfo
-				: undefined;
-			if (!sourceInfo?.path) continue;
-			if (!candidates.has(command.name)) continue;
-			return sourceInfo.path;
-		}
-
-		return undefined;
-	}
-
-	function resolveSkillMessage(skillName: string | undefined, cwd: string): SkillMessageResolution {
-		if (!skillName) {
-			return { kind: "none" };
-		}
-
-		const normalizedSkillName = normalizeSkillName(skillName);
-		if (!normalizedSkillName) {
-			return { kind: "error", error: `Skill "${skillName}" not found` };
-		}
-
-		const skillPath =
-			resolveRegisteredSkillPath(skillName) ?? (isPathResolvableSkillName(normalizedSkillName) ? resolveSkillPath(normalizedSkillName, cwd) : undefined);
-		if (!skillPath) {
-			return { kind: "error", error: `Skill "${skillName}" not found` };
-		}
-
-		try {
-			const skillContent = readSkillContent(skillPath);
-			return {
-				kind: "ready",
-				message: {
-					customType: "skill-loaded",
-					content: `<skill name="${normalizedSkillName}">\n${skillContent}\n</skill>`,
-					display: true,
-					details: { skillName: normalizedSkillName, skillContent, skillPath },
-				},
-			};
-		} catch (error) {
-			return {
-				kind: "error",
-				error: `Failed to read skill "${skillName}": ${error instanceof Error ? error.message : String(error)}`,
-			};
-		}
-	}
-
 	async function waitForTurnStart(ctx: ExtensionContext) {
 		while (ctx.isIdle()) {
 			await new Promise((resolve) => setTimeout(resolve, 10));
@@ -249,10 +143,6 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 
 	function shouldDelegatePrompt(prompt: PromptWithModel, override?: SubagentOverride): boolean {
 		return prompt.subagent !== undefined || override?.enabled === true;
-	}
-
-	function isParallelChainStep(step: ChainStepOrParallel): step is ParallelChainStep {
-		return "parallel" in step;
 	}
 
 	async function executePromptStep(
@@ -357,12 +247,6 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			notify(ctx, prepared.warning, "warning");
 		}
 
-		const skillResolution = resolveSkillMessage(prompt.skill, ctx.cwd);
-		if (skillResolution.kind === "error") {
-			notify(ctx, skillResolution.error, "error");
-			return "aborted";
-		}
-
 		if (!prepared.selectedModel.alreadyActive) {
 			const switched = await pi.setModel(prepared.selectedModel.model);
 			if (!switched) {
@@ -375,7 +259,6 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		if (prompt.thinking) {
 			pi.setThinkingLevel(prompt.thinking);
 		}
-		pendingSkillMessage = skillResolution.kind === "ready" ? skillResolution.message : undefined;
 
 		const startId = ctx.sessionManager.getLeafId();
 		const effectiveContent = combinedTaskPreamble
@@ -428,7 +311,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		currentModel: Model<any> | undefined,
 		currentThinking: ThinkingLevel | undefined,
 		errorState: ExecutionErrorState,
-		phase: "loop" | "chain",
+		phase: string,
 	): Promise<ExecutionErrorState> {
 		if (!shouldRestore) return errorState;
 
@@ -488,19 +371,6 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			ctx.ui.setStatus("prompt-loop", ctx.ui.theme.fg("warning", label));
 		} else {
 			ctx.ui.setStatus("prompt-loop", undefined);
-		}
-	}
-
-	async function executeToolCommand(command: string, ctx: ExtensionCommandContext) {
-		const stripped = command.startsWith("/") ? command.slice(1) : command;
-		const spaceIdx = stripped.indexOf(" ");
-		const name = spaceIdx >= 0 ? stripped.slice(0, spaceIdx) : stripped;
-		const args = spaceIdx >= 0 ? stripped.slice(spaceIdx + 1) : "";
-
-		if (name === "chain-prompts") {
-			await runChainCommand(args, ctx);
-		} else {
-			await runPromptCommand(name, args, ctx);
 		}
 	}
 
@@ -699,8 +569,6 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			name: options.name,
 			content: options.task,
 			models: options.model ? [options.model] : [],
-			chain: undefined,
-			chainContext: undefined,
 			parallel: undefined,
 			worktree: undefined,
 			subagent: options.agent,
@@ -1082,7 +950,6 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 
 			boomerangPreviousSummaries = accumulatedSummaries;
 			loopState = null;
-			pendingSkillMessage = undefined;
 			freshCollapse = null;
 			boomerangCollapse = null;
 			accumulatedSummaries = [];
@@ -1111,359 +978,8 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		}
 	}
 
-	async function runSharedChainExecution(
-		steps: ChainStepOrParallel[],
-		sharedArgs: string[],
-		totalIterations: number | null,
-		fresh: boolean,
-		converge: boolean,
-		shouldRestore: boolean,
-		ctx: ExtensionCommandContext,
-		subagentOverride?: SubagentOverride,
-		cwdOverride?: string,
-		chainContextEnabled = false,
-		chainTemplateWorktree = false,
-		cliWorktree = false,
-	) {
-		let worktreeEnabled = chainTemplateWorktree || cliWorktree;
-		if (worktreeEnabled && !steps.some(isParallelChainStep)) {
-			notify(ctx, `--worktree ignored: chain has no parallel() steps`, "warning");
-			worktreeEnabled = false;
-		}
-		const flattenChainSteps = (): ChainStep[] => {
-			const flattened: ChainStep[] = [];
-			for (const step of steps) {
-				if (isParallelChainStep(step)) {
-					flattened.push(...step.parallel);
-				} else {
-					flattened.push(step);
-				}
-			}
-			return flattened;
-		};
-
-		const validateChainSteps = (): boolean => {
-			const flattened = flattenChainSteps();
-			const missingTemplates = flattened.filter((step) => !chainPrompts.has(step.name));
-			if (missingTemplates.length > 0) {
-				notify(ctx, `Templates not found: ${missingTemplates.map((step) => step.name).join(", ")}`, "error");
-				return false;
-			}
-
-			for (const step of steps) {
-				if (isParallelChainStep(step)) {
-					for (const parallelStep of step.parallel) {
-						if (parallelStep.loopCount !== undefined) {
-							notify(ctx, `Step "${parallelStep.name}" in parallel() does not support per-task --loop.`, "error");
-							return false;
-						}
-						if (parallelStep.withContext === true) {
-							notify(ctx, `Step "${parallelStep.name}" in parallel() does not support per-task --with-context.`, "error");
-							return false;
-						}
-						const stepPrompt = chainPrompts.get(parallelStep.name);
-						if (!stepPrompt) continue;
-						if (stepPrompt.chain) {
-							notify(ctx, `Step "${parallelStep.name}" is a chain template. Chain nesting is not supported.`, "error");
-							return false;
-						}
-						if (!shouldDelegatePrompt(stepPrompt, subagentOverride)) {
-							notify(ctx, `Step "${parallelStep.name}" in parallel() must use delegated execution (subagent).`, "error");
-							return false;
-						}
-					}
-					continue;
-				}
-
-				const stepPrompt = chainPrompts.get(step.name);
-				if (!stepPrompt) continue;
-				if (stepPrompt.chain) {
-					notify(ctx, `Step "${step.name}" is a chain template. Chain nesting is not supported.`, "error");
-					return false;
-				}
-			}
-
-			return true;
-		};
-
-		if (!validateChainSteps()) return;
-
-		const originalModel = getCurrentModel(ctx);
-		const chainInheritedModel = originalModel;
-		const originalThinking = pi.getThinkingLevel();
-		let currentModel = originalModel;
-		let currentThinking = originalThinking;
-		chainActive = true;
-		pendingSkillMessage = undefined;
-		const effectiveMax = totalIterations ?? UNLIMITED_LOOP_CAP;
-		const isUnlimited = totalIterations === null;
-		const useConverge = converge;
-
-		const anchorId = fresh ? ctx.sessionManager.getLeafId() : null;
-		const chainStepNames = steps
-			.map((step) => (isParallelChainStep(step) ? `parallel(${step.parallel.map((item) => item.name).join(", ")})` : step.name))
-			.join(" -> ");
-		let completedIterations = 0;
-		let converged = false;
-		let chainErrorState: ExecutionErrorState = { hasError: false, error: undefined };
-		let lastDelegatedText: string | undefined;
-		let chainAborted = false;
-		if (effectiveMax > 1) {
-			loopState = { currentIteration: 1, totalIterations };
-			accumulatedSummaries = [];
-			updateLoopStatus(ctx);
-		}
-
-		try {
-			for (let iteration = 0; iteration < effectiveMax; iteration++) {
-				if (effectiveMax > 1) {
-					loopState!.currentIteration = iteration + 1;
-					updateLoopStatus(ctx);
-					refreshPrompts(ctx.cwd, ctx);
-					if (!validateChainSteps()) {
-						chainAborted = true;
-						break;
-					}
-				}
-
-				const templates = steps.map((step) =>
-					isParallelChainStep(step)
-						? {
-							kind: "parallel" as const,
-							tasks: step.parallel.map((item) => ({
-								name: item.name,
-								args: item.args,
-								prompt: {
-									...chainPrompts.get(item.name)!,
-									...(cwdOverride ? { cwd: cwdOverride } : {}),
-								},
-							})),
-						}
-						: {
-							kind: "single" as const,
-							singleStep: {
-								prompt: {
-									...chainPrompts.get(step.name)!,
-									...(cwdOverride ? { cwd: cwdOverride } : {}),
-								},
-								stepArgs: step.args,
-								stepLoop: step.loopCount !== undefined ? step.loopCount : 1,
-								stepWithContext: step.withContext === true,
-							},
-						},
-				);
-				const chainStepSummaries: string[] = [];
-				let aborted = false;
-				let iterationChanged = false;
-				let loopPrefix = "";
-				if (effectiveMax > 1) {
-					const label = totalIterations !== null ? `${iteration + 1}/${totalIterations}` : `${iteration + 1}`;
-					loopPrefix = `Loop ${label}, `;
-				}
-
-				for (const [index, stepTemplate] of templates.entries()) {
-					const stepNumber = index + 1;
-					if (stepTemplate.kind === "parallel") {
-						const stepNames = stepTemplate.tasks.map((task) => task.name).join(", ");
-						const stepLabel = `parallel(${stepNames})`;
-						notify(ctx, `${loopPrefix}Step ${stepNumber}/${templates.length}: parallel(${stepNames})`, "info");
-						if (ctx.hasUI) {
-							ctx.ui.setStatus("prompt-chain", ctx.ui.theme.fg("warning", `step ${stepNumber}/${templates.length}: parallel(${stepNames})`));
-						}
-						const stepStartId = ctx.sessionManager.getLeafId();
-						let taskPreamble: string | undefined;
-						const isForkedParallelContext = stepTemplate.tasks.some((task) => task.prompt.inheritContext === true);
-						if (chainContextEnabled && !isForkedParallelContext && chainStepSummaries.length > 0) {
-							taskPreamble = `[Previous chain steps]\n\n${chainStepSummaries.join("\n\n")}`;
-						}
-
-						let delegated;
-						try {
-							delegated = await executeSubagentPromptStep({
-								pi,
-								ctx,
-								currentModel,
-								override: subagentOverride,
-								signal: ctx.signal,
-								inheritedModel: chainInheritedModel,
-								parallel: stepTemplate.tasks.map((task) => ({
-									prompt: task.prompt,
-									args: task.args.length > 0 ? task.args : sharedArgs,
-								})),
-								taskPreamble,
-								worktree: worktreeEnabled,
-							});
-						} catch (error) {
-							notify(ctx, error instanceof Error ? error.message : String(error), "error");
-							aborted = true;
-							break;
-						}
-						if (!delegated) {
-							notify(ctx, "Parallel chain step was not delegated.", "error");
-							aborted = true;
-							break;
-						}
-						lastDelegatedText = delegated.text;
-
-						currentModel = getCurrentModel(ctx);
-						currentThinking = pi.getThinkingLevel();
-						const stepEntries = getIterationEntries(ctx, stepStartId);
-						if (delegated.changed) iterationChanged = true;
-						chainStepSummaries.push(generateChainStepSummary(stepEntries, stepLabel, stepNumber));
-						continue;
-					}
-
-					const singleStep = stepTemplate.singleStep;
-					const stepLoopTotal = singleStep.stepLoop;
-					const stepLoopMax = stepLoopTotal ?? UNLIMITED_LOOP_CAP;
-					const isStepLooping = stepLoopMax > 1;
-					const effectiveArgs = singleStep.stepArgs.length > 0 ? singleStep.stepArgs : sharedArgs;
-					const shouldInjectSummary =
-						shouldDelegatePrompt(singleStep.prompt, subagentOverride) &&
-						singleStep.prompt.inheritContext !== true &&
-						(chainContextEnabled || singleStep.stepWithContext === true);
-					const outerLoopState = loopState ? { ...loopState } : null;
-					const stepStartId = ctx.sessionManager.getLeafId();
-					if (isStepLooping) {
-						loopState = { currentIteration: 1, totalIterations: stepLoopTotal };
-						updateLoopStatus(ctx);
-					}
-
-					try {
-						for (let stepIteration = 0; stepIteration < stepLoopMax; stepIteration++) {
-							if (isStepLooping) {
-								loopState = { currentIteration: stepIteration + 1, totalIterations: stepLoopTotal };
-								updateLoopStatus(ctx);
-							}
-
-							const iterSuffix = isStepLooping
-								? stepLoopTotal !== null
-									? ` (iter ${stepIteration + 1}/${stepLoopTotal})`
-									: ` (iter ${stepIteration + 1})`
-								: "";
-							notify(
-								ctx,
-								`${loopPrefix}Step ${stepNumber}/${templates.length}: ${singleStep.prompt.name}${iterSuffix} ${buildPromptCommandDescription(singleStep.prompt)}`,
-								"info",
-							);
-							if (ctx.hasUI) {
-								ctx.ui.setStatus("prompt-chain", ctx.ui.theme.fg("warning", `step ${stepNumber}/${templates.length}: ${singleStep.prompt.name}`));
-							}
-							const taskPreamble = shouldInjectSummary && chainStepSummaries.length > 0
-								? `[Previous chain steps]\n\n${chainStepSummaries.join("\n\n")}`
-								: undefined;
-
-							const stepLoopContext = isStepLooping
-								? `Step ${stepNumber}/${templates.length}: ${singleStep.prompt.name}${iterSuffix}`
-								: undefined;
-							const stepIterationStartId = ctx.sessionManager.getLeafId();
-							const stepResult = await executePromptStep(
-								singleStep.prompt,
-								effectiveArgs,
-								ctx,
-								currentModel,
-								subagentOverride,
-								chainInheritedModel,
-								taskPreamble,
-								stepLoopContext,
-							);
-							if (stepResult === "aborted") {
-								chainAborted = true;
-								aborted = true;
-								break;
-							}
-							if (shouldDelegatePrompt(singleStep.prompt, subagentOverride)) {
-								lastDelegatedText = stepResult.text;
-							}
-
-							currentModel = getCurrentModel(ctx);
-							currentThinking = pi.getThinkingLevel();
-
-							const stepIterationEntries = getIterationEntries(ctx, stepIterationStartId);
-							const stepIterationChanged = didIterationMakeChanges(stepIterationEntries);
-							if (isStepLooping && singleStep.prompt.converge !== false && !stepIterationChanged) {
-								break;
-							}
-						}
-					} finally {
-						if (isStepLooping) {
-							loopState = outerLoopState ? { ...outerLoopState } : null;
-							updateLoopStatus(ctx);
-						}
-					}
-
-					if (aborted) break;
-					const stepEntries = getIterationEntries(ctx, stepStartId);
-					if (didIterationMakeChanges(stepEntries)) iterationChanged = true;
-					chainStepSummaries.push(generateChainStepSummary(stepEntries, singleStep.prompt.name, stepNumber));
-				}
-
-				if (aborted) {
-					chainAborted = true;
-					break;
-				}
-				completedIterations++;
-
-				if (useConverge && (isUnlimited || effectiveMax > 1) && !iterationChanged) {
-					converged = true;
-					break;
-				}
-
-				if (anchorId && iteration < effectiveMax - 1) {
-					freshCollapse = { targetId: anchorId, task: chainStepNames, iteration: iteration + 1, totalIterations };
-					const result = await ctx.navigateTree(anchorId, { summarize: true });
-					freshCollapse = null;
-					if (result.cancelled) {
-						chainAborted = true;
-						notify(ctx, "Loop cancelled", "warning");
-						break;
-					}
-				}
-			}
-
-		} catch (error) {
-			chainErrorState = { hasError: true, error };
-		} finally {
-			chainErrorState = await restoreAfterExecution(
-				ctx,
-				shouldRestore,
-				originalModel,
-				originalThinking,
-				getCurrentModel(ctx),
-				pi.getThinkingLevel(),
-				chainErrorState,
-				"chain",
-			);
-
-			pendingSkillMessage = undefined;
-			chainActive = false;
-			loopState = null;
-			freshCollapse = null;
-			boomerangCollapse = null;
-			accumulatedSummaries = [];
-			updateLoopStatus(ctx);
-			if (ctx.hasUI) {
-				ctx.ui.setStatus("prompt-chain", undefined);
-			}
-
-			if (!chainErrorState.hasError) {
-				notifyLoopCompletion(ctx, completedIterations, totalIterations, effectiveMax, converged, true);
-			}
-		}
-
-		if (lastDelegatedText && !chainErrorState.hasError && !chainAborted) {
-			pi.sendUserMessage(`[Delegated chain complete: ${chainStepNames}]\n\n${lastDelegatedText}`);
-			await waitForTurnStart(ctx);
-			await ctx.waitForIdle();
-		}
-
-		if (chainErrorState.hasError) {
-			throw chainErrorState.error;
-		}
-	}
 
 	async function runPromptCommand(name: string, args: string, ctx: ExtensionCommandContext) {
-		storedCommandCtx = ctx;
 		refreshPrompts(ctx.cwd, ctx);
 		const prompt = prompts.get(name);
 		if (!prompt) {
@@ -1503,59 +1019,6 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 					subagentOverride: subagent.override,
 					fork: subagent.fork,
 				},
-			);
-			return;
-		}
-
-		if (prompt.chain) {
-			if (subagent.model) notify(ctx, `--model is not supported on chain prompts (ignored)`, "warning");
-			if (subagent.fork) notify(ctx, `--fork is not supported on chain prompts (ignored)`, "warning");
-			const worktreeExtraction = extractWorktreeFlag(argsWithoutSubagent);
-			const extracted = extractChainContextFlag(worktreeExtraction.args);
-			const chainContextEnabled = extracted.chainContext || prompt.chainContext === "summary";
-			const cliWorktree = worktreeExtraction.worktree;
-			const loop = extractLoopCount(extracted.args);
-			let totalIterations: number | null = prompt.loop !== undefined ? prompt.loop : 1;
-			let fresh = false;
-			let converge = true;
-			let cleanedArgs = extracted.args;
-
-			if (loop) {
-				totalIterations = loop.loopCount;
-				fresh = loop.fresh;
-				converge = loop.converge;
-				cleanedArgs = loop.args;
-			} else if (prompt.loop !== undefined) {
-				const flags = extractLoopFlags(extracted.args);
-				fresh = flags.fresh;
-				converge = flags.converge;
-				cleanedArgs = flags.args;
-			}
-
-			const { steps, invalidSegments } = parseChainDeclaration(prompt.chain);
-			if (invalidSegments.length > 0) {
-				notify(ctx, `Invalid chain step: ${invalidSegments[0]}`, "error");
-				return;
-			}
-			if (steps.length === 0) {
-				notify(ctx, "No templates specified", "error");
-				return;
-			}
-
-			const cwdOverride = runtimeCwd ?? prompt.cwd;
-			await runSharedChainExecution(
-				steps,
-				parseCommandArgs(cleanedArgs),
-				totalIterations,
-				fresh || prompt.fresh === true,
-				converge && prompt.converge !== false,
-				prompt.restore,
-				ctx,
-				subagent.override,
-				cwdOverride,
-				chainContextEnabled,
-				prompt.worktree === true,
-				cliWorktree,
 			);
 			return;
 		}
@@ -1624,13 +1087,10 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 	}
 
 	function resetSessionScopedState(ctx: ExtensionContext) {
-		storedCommandCtx = null;
-		pendingSkillMessage = undefined;
 		previousModel = undefined;
 		previousThinking = undefined;
 		runtimeModel = ctx.model;
 		boomerangCollapse = null;
-		toolManager.clearQueue();
 		refreshPrompts(ctx.cwd, ctx);
 	}
 
@@ -1642,37 +1102,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		runtimeModel = event.model;
 	});
 
-	pi.on("before_agent_start", async (event) => {
-		let systemPrompt = event.systemPrompt;
-
-		if (toolManager.isEnabled() && !loopState && !chainActive) {
-			const toolGuidance = toolManager.getGuidance();
-			const guidance = toolGuidance
-				? `The run-prompt tool is available for running prompt template commands. ${toolGuidance}`
-				: "The run-prompt tool is available for running prompt template commands.";
-			systemPrompt += `\n\n${guidance}`;
-		}
-
-		if (loopState) {
-			const iterText =
-				loopState.totalIterations !== null
-					? `iteration ${loopState.currentIteration} of ${loopState.totalIterations}`
-					: `iteration ${loopState.currentIteration}`;
-			systemPrompt += `\n\nYou are on ${iterText} of the same prompt. Previous iterations and their results are visible in the conversation above. Build on that work — focus on what remains to improve.`;
-		}
-
-		const skillMessage = consumePendingSkillMessage();
-		const hasSystemPromptOverride = systemPrompt !== event.systemPrompt;
-		if (!hasSystemPromptOverride && !skillMessage) return;
-
-		return {
-			...(hasSystemPromptOverride ? { systemPrompt } : {}),
-			...(skillMessage ? { message: skillMessage } : {}),
-		};
-	});
-
 	pi.on("agent_end", async (_event, ctx) => {
-		if (chainActive) return;
 		if (loopState) return;
 
 		runtimeModel = ctx.model;
@@ -1682,14 +1112,9 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		previousModel = undefined;
 		previousThinking = undefined;
 
-		const restoreFn = async () => {
-			if (restoreModel || restoreThinking !== undefined) {
-				await restoreSessionState(ctx, restoreModel, restoreThinking, getCurrentModel(ctx), pi.getThinkingLevel());
-			}
-		};
-		const processed = await toolManager.processQueue(ctx, restoreFn);
-		if (processed) return;
-		await restoreFn();
+		if (restoreModel || restoreThinking !== undefined) {
+			await restoreSessionState(ctx, restoreModel, restoreThinking, getCurrentModel(ctx), pi.getThinkingLevel());
+		}
 	});
 
 	pi.on("session_before_tree", async (event) => {
@@ -1720,55 +1145,5 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		};
 	});
 
-	async function runChainCommand(args: string, ctx: ExtensionCommandContext) {
-		storedCommandCtx = ctx;
-		refreshPrompts(ctx.cwd, ctx);
-
-		const subagent = extractSubagentOverride(args);
-		const runtimeCwd = subagent.cwd ? expandCwdPath(subagent.cwd) : undefined;
-		if (subagent.cwd && !runtimeCwd) {
-			notify(ctx, `Invalid --cwd path: must be absolute`, "error");
-			return;
-		}
-		const worktreeExtraction = extractWorktreeFlag(subagent.args);
-		const extracted = extractChainContextFlag(worktreeExtraction.args);
-		const loop = extractLoopCount(extracted.args);
-		const cleanedArgs = loop ? loop.args : extracted.args;
-
-		const { steps, sharedArgs, invalidSegments } = parseChainSteps(cleanedArgs);
-		if (invalidSegments.length > 0) {
-			notify(ctx, `Invalid chain step: ${invalidSegments[0]}`, "error");
-			return;
-		}
-		if (steps.length === 0) {
-			notify(ctx, "No templates specified", "error");
-			return;
-		}
-
-		await runSharedChainExecution(
-			steps,
-			sharedArgs,
-			loop ? loop.loopCount : 1,
-			loop?.fresh === true,
-			loop?.converge ?? true,
-			true,
-			ctx,
-			subagent.override,
-			runtimeCwd,
-			extracted.chainContext,
-			false,
-			worktreeExtraction.worktree,
-		);
-	}
-
 	refreshPrompts(process.cwd());
-	if (toolManager.isEnabled()) toolManager.ensureRegistered();
-
-	pi.registerCommand("chain-prompts", {
-		description: "Chain prompt templates sequentially [template -> template -> ...]",
-		handler: async (args, ctx) => {
-			await runChainCommand(args, ctx);
-		},
-	});
-	toolManager.registerCommand();
 }

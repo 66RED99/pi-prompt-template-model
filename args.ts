@@ -230,11 +230,6 @@ function extractBooleanFlag(argsString: string, flag: string): { args: string; f
 	return { args: cleaned.trim(), found };
 }
 
-export function extractChainContextFlag(argsString: string): { args: string; chainContext: boolean } {
-	const { args, found } = extractBooleanFlag(argsString, "--chain-context");
-	return { args, chainContext: found };
-}
-
 export function extractWorktreeFlag(argsString: string): { args: string; worktree: boolean } {
 	const { args, found } = extractBooleanFlag(argsString, "--worktree");
 	return { args, worktree: found };

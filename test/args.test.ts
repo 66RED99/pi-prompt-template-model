@@ -1,7 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-	extractChainContextFlag,
 	extractLineupOverrides,
 	extractLoopCount,
 	extractLoopFlags,
@@ -180,32 +179,6 @@ test("extractLoopFlags handles newline-separated flags", () => {
 	});
 });
 
-test("extractChainContextFlag strips bare --chain-context tokens", () => {
-	assert.deepEqual(extractChainContextFlag("task --chain-context"), {
-		args: "task",
-		chainContext: true,
-	});
-});
-
-test("extractChainContextFlag strips repeated flags", () => {
-	assert.deepEqual(extractChainContextFlag("--chain-context task --chain-context"), {
-		args: "task",
-		chainContext: true,
-	});
-});
-
-test("extractChainContextFlag preserves quoted flags", () => {
-	const extracted = extractChainContextFlag('"--chain-context" --chain-context task');
-	assert.equal(extracted.chainContext, true);
-	assert.deepEqual(parseCommandArgs(extracted.args), ["--chain-context", "task"]);
-});
-
-test("extractChainContextFlag composes with chain-style args and shared args separator", () => {
-	assert.deepEqual(extractChainContextFlag('analyze -> fix --chain-context -- "src/main.ts"'), {
-		args: 'analyze -> fix  -- "src/main.ts"',
-		chainContext: true,
-	});
-});
 
 test("extractWorktreeFlag strips bare tokens and preserves quoted values", () => {
 	assert.deepEqual(extractWorktreeFlag("parallel(scan,review) --worktree"), {
